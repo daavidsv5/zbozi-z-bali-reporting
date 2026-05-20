@@ -1,32 +1,29 @@
-name: Update Data
+name: Import dat
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # 05:00 UTC = 06:00 CET / 07:00 CEST
-  workflow_dispatch:        # Možnost spustit ručně přes GitHub UI
-
-permissions:
-  contents: write
+    - cron: '0 1 * * *'   # 01:00 UTC = 02:00 SEČ / 03:00 SELČ
+  workflow_dispatch:        # Ruční spuštění (tlačítko v aplikaci nebo přes GitHub UI)
 
 jobs:
-  update:
+  import:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Install dependencies
+        run: npm ci --omit=dev
 
-      - name: Run update script
-        run: node scripts/updateData.js
+      - name: Run import
+        env:
+          DATABASE_URL:       ${{ secrets.DATABASE_URL }}
+          ORDERS_SHEET_URL:   ${{ secrets.ORDERS_SHEET_URL }}
+          COST_SHEET_URL:     ${{ secrets.COST_SHEET_URL }}
+        run: node scripts/importData.js
