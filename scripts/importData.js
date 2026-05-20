@@ -98,12 +98,26 @@ function detectMarket(currency) {
 }
 
 const SHIPPING_PREFIXES = ['Zásilkovna', 'Zasilkovna', 'GLS', 'PPL', 'Česká pošta', 'DPD', 'Packeta', 'In Time', 'Uloženka'];
+
+// Všichni dopravci → kanonický název
+const CARRIER_ALIASES = [
+  [/^zásilkovna/i,        'Zásilkovna'],
+  [/^zasilkovna/i,        'Zásilkovna'],
+  [/^packeta/i,           'Zásilkovna'],
+  [/^česká\s*pošta/i,    'Zásilkovna'],
+  [/^ceska\s*posta/i,     'Zásilkovna'],
+  [/^dobírk/i,            'Zásilkovna'],
+  [/^dobierka/i,          'Zásilkovna'],
+  [/^doprava$/i,          'Zásilkovna'],
+];
+
 function normalizeShipping(name) {
   if (!name) return '';
-  for (const prefix of SHIPPING_PREFIXES) {
-    if (name.toLowerCase().startsWith(prefix.toLowerCase())) return prefix;
+  const n = name.trim();
+  for (const [re, canonical] of CARRIER_ALIASES) {
+    if (re.test(n)) return canonical;
   }
-  return name.split(' - ')[0].trim();
+  return n.split(' - ')[0].trim();
 }
 
 /**
@@ -156,11 +170,14 @@ async function processOrders(rows) {
       const vatAmount   = parseNum(row['DPH celkem']);
       const shippingVat = parseNum(row['Sazba dopravy']);
       const email       = row['Kontaktní e‑mail'] || row['Kontaktní e-mail'] || '';
+      // Produktový obrat = celkem bez dopravy; bez DPH = proporcionální VAT ratio
+      const productRevenueVat = totalVat - shippingVat;
+      const vatRatio          = totalVat > 0 ? (totalVat - vatAmount) / totalVat : 1;
       orderMap.set(orderId, {
         orderId, date, market, currency,
         totalVat, vatAmount,
-        revenue:     totalVat - vatAmount,
-        revenueVat:  totalVat,
+        revenue:     productRevenueVat * vatRatio,
+        revenueVat:  productRevenueVat,
         shippingVat,
         email,
         shippingMethod: normalizeShipping(row['Způsob doručení'] || ''),

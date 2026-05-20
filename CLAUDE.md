@@ -1,388 +1,233 @@
 # CLAUDE.md
 
-Tento soubor slouží jako stručný návod pro Claude Code (claude.ai/code) při práci s tímto repozitářem.
+Tento soubor slouží jako návod pro Claude Code při práci s tímto repozitářem.
 
 ## Příkazy
 
 ```bash
-npm install      # Nainstaluje závislosti
-npm run dev      # Spustí dev server (Next.js, hot reload)
-npm run build    # Produkční build — často odhalí TS chyby
-npm run start    # Spustí produkční build
-
-node scripts/updateData.js   # Ruční refresh reálných dat z Google Sheets
+npm install               # Nainstaluje závislosti
+npm run dev               # Spustí dev server (Next.js, hot reload)
+npm run build             # Produkční build — odhalí TS chyby
+npm run start             # Spustí produkční build
+npm run db:migrate        # Vytvoří tabulky v NeonDB (jednorázově)
+npm run db:import         # Importuje objednávky + náklady z Google Sheets do NeonDB
+npm run db:seed           # Vytvoří admin účet
 ```
 
 V projektu nejsou nakonfigurované linter ani testy.
 
 ## Architektura
 
-Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, Recharts, NextAuth 5, Radix UI.
+Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, Recharts, NextAuth 5, NeonDB (PostgreSQL).
 
 ### Tok dat
 
 ```
 Google Sheets (CSV)
-       ↓  scripts/updateData.js  (denně v 06:00 via Windows Task Scheduler)
-       ↓  na konci skriptu: git commit + push → Vercel automaticky redeploy
-data/realDataCZ.ts + realDataSK.ts + productData* + marginData* + hourlyData* +
-crossSellData* + retentionData* + orderValueData* + shippingPaymentData* + lastUpdate.ts
+  ORDERS_SHEET_URL  →  objednávky (Shoptet export)
+  COST_SHEET_URL    →  marketingové náklady (Facebook + Google Ads, per kampaň)
        ↓
-data/mockGenerator.ts  →  export const mockData: DailyRecord[]
-                       →  getDailyMarketingData() + getMarketingSourceData()
+  scripts/importData.js  (npm run db:import)
        ↓
-hooks/useDashboardData.ts  (filters + aggregates → KpiData, chartData, YoY)
+  NeonDB (PostgreSQL) — tabulky:
+    daily_orders      (date, market, revenue_vat, revenue, order_count, shipping_revenue)
+    daily_marketing   (date, market, source, cost, clicks, impressions, conversions)
+    customer_orders   (order_id, date, market, customer_hash, revenue_vat, revenue, ...)
+    order_values      (order_id, date, market, value)
+    product_sales     (date, market, product_name, variant, sku, quantity, revenue)
+    daily_shipping    (date, market, name, order_count, revenue_vat, free_count)
+    daily_payment     (date, market, name, order_count, revenue_vat)
+    hourly_behavior   (market, day_of_week, hour, order_count)
        ↓
-app/(dashboard|orders|marketing|products|margin|analytics|behavior|crosssell|retention|shipping)/page.tsx
+  /api/dashboard    →  hooks/useDashboardData.ts  →  stránky
+  /api/products     →  app/products/page.tsx
 ```
 
-### Aktualizace dat na Vercelu
+### Aktualizace dat
 
-- **Primárně:** `.github/workflows/update-data.yml` — GitHub Actions spouští `node scripts/updateData.js` každý den v 05:00 UTC (= 06:00 CET / 07:00 CEST), nezávisle na stavu počítače
-- Na konci skriptu se provede `git commit + push` → Vercel automaticky nasadí nová data
-- Workflow lze spustit i ručně: GitHub → Actions → Update Data → Run workflow
-- Tlačítko **Aktualizovat data** (viditelné pouze adminům) volá `/api/update`:
-  - Na Vercelu: spustí Vercel Deploy Hook (`VERCEL_DEPLOY_HOOK_URL` env proměnná)
-  - Lokálně: spustí `node updateData.js` přímo
-- `data/lastUpdate.ts` — auto-gen timestamp poslední aktualizace, zobrazen v TopBaru vpravo
+- **Automaticky každý den v 2:00 SEČ** — GitHub Actions (`.github/workflows/update-data.yml`) spouští `npm run db:import`, data jdou přímo do NeonDB
+- **Tlačítko Aktualizovat data** (viditelné pouze adminům v TopBaru) — volá `POST /api/update`, který triggeruje GitHub Actions workflow přes `workflow_dispatch` API → import proběhne za ~1 minutu
+- **Objednávky** — uživatel cca 1× za 3 dny nahraje nový export do Google Sheets, pak klikne na tlačítko
 
-**Windows Task Scheduler** — tasky `Shoptet Reporting - Update Data` a `ShoptetReportingUpdate` (záloha, primárně nahrazeno GitHub Actions):
-- Spustitelný soubor: `cmd.exe`, argument: `/c "C:\Users\daavi\Desktop\VIBECODING\Shoptet reporting\shoptet-reporting\scripts\updateData.bat"`
-- Uvozovky jsou nutné kvůli mezeře v cestě
-- `DisallowStartIfOnBatteries` = false (taska se spustí i na baterii)
+### Env proměnné (`.env.local`)
 
-### Stránky
+```
+AUTH_SECRET=...
+DATABASE_URL=postgresql://...         # NeonDB connection string
+ORDERS_SHEET_URL=https://...          # Google Sheets CSV — objednávky
+COST_SHEET_URL=https://...            # Google Sheets CSV — náklady
+GITHUB_PAT=ghp_...                    # Personal Access Token (scope: workflow) — pro tlačítko
+GA4_PROPERTY_ID=                      # GA4 — doplnit
+GA4_CLIENT_EMAIL=                     # GA4 — doplnit
+GA4_PRIVATE_KEY=                      # GA4 — doplnit
+META_ACCESS_TOKEN=...                 # Meta API token — čeká na správný účet
+META_AD_ACCOUNT_ID=314023350872610    # Meta ad account — čeká na přístup
+```
 
-| Stránka | Popis |
-|---------|-------|
-| `/hlavni-dashboard` | **Hlavní Dashboard** — měsíční přehled 9 KPI metrik jako grouped bar charty (Tržby bez DPH, Hrubý zisk, Počet obj., Mark. investice, PNO %, AOV, Marže %, CPA, **Konverzní poměr z GA4**). Tooltip každého grafu zobrazuje hodnoty obou roků + YoY % (zelená/červená). Selektor trhu + **selektor jednotlivých roků** v TopBaru (yearB = selectedYear − 1, automaticky). Výchozí přesměrování z `/`. |
-| `/dashboard` | **Klíčové ukazatele (KPI)** — Tržby s/bez DPH, Počet obj., AOV, Marketing. investice, PNO, CPA, Marže, Marže %, Cena za nového zákazníka, Hrubý zisk na obj. + samostatný řádek Hrubý zisk + Hrubý zisk %. Pod KPI boxy: **4 samostatné spojnicové grafy YoY** (Tržby bez DPH, Počet objednávek, Náklady, PNO %) z `KpiLineCharts`. |
-| `/orders` | Objednávky — tržby vs počet, distribuce hodnot košíku (histogram), rozložení CZ/SK |
-| `/marketing` | Marketingové investice — CPC per channel (FB/Google), trend kliky+CPC (ROAS odstraněn) |
-| `/products` | Prodejnost produktů — ABC analýza (A/B/C segmenty), sortovatelná tabulka, YoY, CSV export. Nad tabulkou: **graf vývoje tržeb bez DPH + počtu kusů** pro vybrané produkty s vyhledáváním (autocomplete), dual Y-osa (tržby = plná čára, kusy = čárkovaná). |
-| `/margin` | Maržový report — marže %, hrubý zisk, grafy |
-| `/analytics` | GA4 integrace — sessions, CVR, sources+devices (YoY), vstupní stránky. **Zdroje návštěvnosti jako tabulka** (Sessions, podíl, CVR, Transakce, podíl, Tržby, podíl — vše s YoY). **KPI boxy Tržby bez DPH (GA4) + Odchylka GA4 vs. Shoptet** (barevný signál ≤5 % zelená, ≤15 % oranžová, >15 % červená). Měna dynamická (CZK/EUR dle zvoleného trhu). |
-| `/meta` | Meta Ads — KPI boxy s YoY (útrata, dosah, imprese, kliky, CTR, CPC, nákupy, tržby z reklam, CPA, ROAS), grafy CPC/CPA/Nákupy/ROAS po dnech, tabulka kreativ s filtrem kampaně+sady reklam |
-| `/behavior` | Nákupní chování — týdenní srovnání, hourly grid (all-time agregace) |
-| `/crosssell` | Cross-sell potenciál — top 100 produktových párů |
-| `/retention` | Retenční analýza — RFM segmentace, LTV, AOV, repeat purchase rate, měsíční graf Noví vs. stávající zákazníci (100% stacked bar) |
-| `/shipping` | Doprava a platby — KPI vč. zisku/ztráty dopravy + **Doprava zdarma %** (bez Osobního odběru), ceník dopravců (CZ/SK), P&L tabulka per dopravce, **graf Doprava zdarma % v čase** (sloupcový s průměrnou referenční čarou). Layout donutů + tabulek: **pies v řádku 1, tabulky v řádku 2** (4 položky v jednom `grid-cols-2`) — tabulky jsou vždy zarovnané vedle sebe. |
-| `/login` | Přihlášení (NextAuth) |
-| `/admin/users` | Správa uživatelů (admin only) |
+GitHub repo secrets (pro Actions): `DATABASE_URL`, `ORDERS_SHEET_URL`, `COST_SHEET_URL`, `GITHUB_PAT`
 
 ### Práce s měnami
 
-- CZ data jsou v **CZK**. SK data jsou v **EUR**.
-- `getDisplayCurrency(countries)` v `data/types.ts`: vrací `'EUR'` pouze tehdy, když je vybrané jen SK; jinak `'CZK'`.
-- Při kombinaci CZ+SK se SK hodnoty násobí `eurToCzk` (live rate z frankfurter.app, fallback `EUR_TO_CZK = 25`) uvnitř `useDashboardData` a `getMarketingSourceData` před agregací.
-- Všechny money formattery berou `currency: 'CZK' | 'EUR'`.
+**Vždy zobrazujeme v CZK.** `getDisplayCurrency()` vrací vždy `'CZK'`.
 
-### Meziroční srovnání (YoY)
+- SK `revenue` a `revenue_vat` jsou v EUR → vždy násobit `eurToCzk`
+- SK `cost` (marketingové náklady) jsou **již v CZK** → **nikdy nenásobit**
+- Live EUR/CZK kurz z `frankfurter.app`, cachovaný denně v `localStorage`, fallback `EUR_TO_CZK = 25`
+- Vzor správného výpočtu:
+  ```typescript
+  const revMult = r.market === 'SK' ? eurToCzk : 1;  // jen pro revenue
+  revenue += r.revenue * revMult;
+  cost    += r.cost;  // bez násobení — už je v CZK
+  ```
 
-- **CZ nemá YoY** — e-shop běží od května 2025. `hasPrevData` bude `false` kdykoliv je ve filtru CZ a nejsou dostupné záznamy z předchozího roku.
-- **SK má YoY** — reálná data od března 2024; mock SK data (seeded RNG) doplňují leden–únor 2024 jako základ pro YoY.
-- `hasPrevData` předávej do `KpiCard`, `RevenueOrdersChart` a `CostPnoChart`, aby šlo podmíněně skrýt YoY badge a "minulý rok" řady v grafech.
+### API routes (NeonDB)
 
-### Hlavní Dashboard (`/hlavni-dashboard`)
+**`GET /api/dashboard?start&end&market`**
+- Joinuje `daily_orders` + `daily_marketing` přes CTE `all_days` (UNION obou tabulek)
+- Důvod UNION: dny s náklady ale bez objednávek (typicky SK) musí být vidět
+- Vrací: `{ daily: ApiRecord[], prevDaily: ApiRecord[] }` (prevDaily = stejné období -1 rok)
 
-Výchozí stránka aplikace (redirect z `/`). Zobrazuje 8 grouped bar chartů s měsíčními daty pro 2 vybrané roky.
+**`GET /api/products?start&end&market`**
+- Vrací: `{ daily: ApiProductRow[], prevTotals: ApiPrevTotalWithMarket[] }`
+- `daily` — per-date záznamy pro trend chart
+- `prevTotals` — součty za předchozí rok (GROUP BY market, product_name) pro YoY
 
-**Selektory** — zobrazují se v TopBaru místo standardních Trh/Období filtrů, když je aktivní cesta `/hlavni-dashboard`:
-- Přepínač **Vše / CZ / SK** — trh
-- Skupina tlačítek **jednotlivých roků** — výběrem roku se `yearB` nastaví automaticky na `selectedYear − 1`; napravo od tlačítek se zobrazuje label „vs. YYYY"
+**`GET /api/shipping`**
+- Vrací všechna data z `daily_shipping` + `daily_payment` jako `ShippingPaymentRecord[]`
+- Klient filtruje podle trhu a období (client-side, data jsou malá ~2000 řádků)
 
-`hooks/useHlavniDashboard.tsx` — stav: `selectedYear`, `setSelectedYear`, `yearOptions: number[]`; `yearA = selectedYear`, `yearB = selectedYear - 1`.
+**`GET /api/retention`**
+- Groupuje `customer_orders` podle `customer_hash` a vrací pole `{ market, dates, revenues, revsVat }[]`
+- Klient merguje CZ+SK a konvertuje EUR→CZK (SK revenue × `EUR_TO_CZK`)
 
-**Stav** — spravován v `hooks/useHlavniDashboard.tsx` (`HlavniDashboardProvider` je v `ConditionalLayout`). Stránka stav pouze čte přes `useHlavniDashboard()`, lokální state nepoužívá.
+**`POST /api/update`** — admin only, triggeruje GitHub Actions `workflow_dispatch`
 
-**Grafy (2×4 grid + 1):** Tržby bez DPH (modrá), Hrubý zisk (zelená), Počet objednávek (modrá), Marketingové investice (červená), PNO % (cyan), AOV (indigo), Marže % (zelená), CPA (fialová), **Konverzní poměr** (teal — GA4, CZ+SK). Světlejší barva = starší rok, tmavší = novější rok.
+### `ApiRecord` interface
 
-**Tooltip s YoY:** Každý graf zobrazuje v tooltipu hodnoty obou roků + řádek `YoY: ±X,X %` (zelená = růst, červená = pokles). Pokud je hodnota předchozího roku 0, YoY se nezobrazí.
+```typescript
+interface ApiRecord {
+  date: string;
+  market: 'CZ' | 'SK';
+  revenue_vat: number;      // s DPH (SK v EUR → konvertovat)
+  revenue: number;           // bez DPH (SK v EUR → konvertovat)
+  order_count: number;
+  shipping_revenue: number;
+  cost: number;              // celkové náklady (už v CZK)
+  clicks_facebook: number;
+  clicks_google: number;
+  cost_facebook: number;     // už v CZK
+  cost_google: number;       // už v CZK
+}
+```
 
-**Konverzní poměr (GA4):** Data fetchuje `useEffect` z `/api/analytics/cvr-monthly?yearA=YYYY` při každé změně roku. Surová data (`rawCvr`) se ukládají do stavu, `cvrData` je `useMemo` přepočítaný dle trhu — pro „Vše" se sessions a conversions CZ+SK sečtou před dělením (ne průměr procent).
+### hooks/useDashboardData.ts
 
-**Hrubý zisk** = `marginRev - purchaseCost - cost` (marže minus marketingové náklady). Pokud `marginData*` pro daný rok/měsíc neexistuje, zobrazí 0.
+Vrací: `{ daily, prevDaily, currentData, prevData, kpi, prevKpi, yoy, chartData, currency, hasPrevData, loading, error }`
+
+**Klíčové:** `chartData` mapuje prev-year záznamy na aktuální datumy (+1 rok) aby obě série sdílely stejnou osu X v grafech. Bez toho by se zobrazovalo dvojité období.
+
+```typescript
+const dateKey = isPrev ? shiftToCurrentYear(r.date, 1) : r.date;
+```
+
+### Stránky
+
+| Stránka | Zdroj dat | Popis |
+|---------|-----------|-------|
+| `/hlavni-dashboard` | `/api/dashboard` | Měsíční grouped bar charty YoY (Tržby s DPH, Tržby bez DPH, Objednávky, Investice, PNO, AOV, CPA + CVR z GA4) |
+| `/dashboard` | `/api/dashboard` | KPI boxy + 4 spojnicové grafy YoY + DailyKpiTable |
+| `/marketing` | `/api/dashboard` (`daily`) | FB+Google náklady/kliky/CPC, denní tabulka |
+| `/products` | `/api/products` | ABC analýza, trend chart, sortovatelná tabulka, CSV export |
+| `/orders` | `/api/dashboard` + statická data | Tržby, histogram hodnot košíku, CZ/SK distribuce |
+| `/analytics` | `/api/analytics` (GA4) | Sessions, CVR, zdroje, trychtýř |
+| `/meta` | `/api/meta` (Meta Graph API) | KPI, denní grafy, tabulka kreativ — čeká na správný token |
+| `/margin` | statická data (`marginData*`) | Marže, hrubý zisk |
+| `/shipping` | `/api/shipping` | Doprava, platby, P&L |
+| `/retention` | `/api/retention` | RFM, LTV, Noví vs. stávající (CZ+SK sloučeno v CZK) |
+| `/behavior` | statická data (`hourlyData*`) | Hourly grid (all-time) |
+| `/crosssell` | statická data (`crossSellData*`) | Top 100 párů produktů |
 
 ### Klíčové soubory
 
 | Soubor | Účel |
 |--------|------|
-| `data/types.ts` | `DailyRecord`, `KpiData`, `FilterState`, `TimePeriod`, `EUR_TO_CZK`, `getDisplayCurrency` |
-| `data/mockGenerator.ts` | Kombinuje reálná + mock data; `getDailyMarketingData()` + `getMarketingSourceData()` |
-| `data/realDataCZ.ts` | Auto-gen reálná CZ data (CZK) — **needitovat ručně** |
-| `data/realDataSK.ts` | Auto-gen reálná SK data (EUR) — **needitovat ručně** |
-| `data/lastUpdate.ts` | Auto-gen timestamp poslední aktualizace dat — **needitovat ručně** |
-| `data/productDataCZ.ts` / `productDataSK.ts` | Prodej produktů (počet kusů, tržby) — auto-gen |
-| `data/marginDataCZ.ts` / `marginDataSK.ts` | Marže (nákupní cena vs tržby bez DPH) — auto-gen |
-| `data/hourlyDataCZ.ts` / `hourlyDataSK.ts` | Nákupní chování 7×24 grid — auto-gen, all-time |
-| `data/crossSellDataCZ.ts` / `crossSellDataSK.ts` | Top 100 produktových párů — auto-gen |
-| `data/retentionDataCZ.ts` / `retentionDataSK.ts` | Per-customer retence `{ dates, revenues, revsVat }[]` — auto-gen |
-| `data/orderValueDataCZ.ts` / `orderValueDataSK.ts` | Per-order košík bez DPH `{ date, value }[]` — auto-gen |
-| `data/shippingPaymentDataCZ.ts` / `shippingPaymentDataSK.ts` | Doprava+platby po dnech — auto-gen |
-| `lib/retentionUtils.ts` | Všechny výpočty pro `/retention` (KPI, YoY, RFM segmentace, distribuce, měsíční Noví vs. stávající) |
-| `lib/formatters.ts` | `formatCurrency`, `formatPercent`, `formatNumber`, `formatDate`, `formatShortDate`, `formatMonthYear`, `localIsoDate` |
-| `app/api/meta/route.ts` | Meta Marketing API — KPI + denní breakdown + kreativy; filtruje kampaně obsahující "myfish" |
-| `app/meta/page.tsx` | Meta Ads stránka — KPI s YoY, grafy po dnech, tabulka kreativ s filtrem |
-| `components/kpi/StatCard.tsx` | Sdílená KPI karta (border-2 border-blue-800, icon vpravo); prop `negative` = rose varianta; props `yoy`, `hasPrevData`, `invertYoy` pro YoY badge |
-| `components/kpi/KpiCard.tsx` | KPI karta se sparkline a YoY badge; prop `variant: 'default' \| 'green' \| 'red'` mění barvu rámečku, ikony a hodnoty |
-| `components/charts/KpiLineCharts.tsx` | 4 samostatné spojnicové grafy YoY pro `/dashboard`: Tržby bez DPH, Počet objednávek, Náklady, PNO %. Solid = aktuální, dashed = loni. Prop `isMonthly` přepíná formát osy X (dny/měsíce). |
-| `hooks/useFilters.ts` | `FiltersProvider` + `useFilters()` + `getDateRange()` + live EUR rate |
-| `hooks/useDashboardData.ts` | Filtruje, agreguje, normalizuje měny, počítá KPI + chartData + YoY |
-| `app/hlavni-dashboard/page.tsx` | Hlavní Dashboard — 9 monthly grouped bar chartů (8 Shoptet + CVR z GA4), tooltip s YoY %, čte stav z `useHlavniDashboard` |
-| `app/api/analytics/cvr-monthly/route.ts` | GA4 endpoint — měsíční sessions+conversions pro CZ i SK, yearA + yearA-1; 4 paralelní requesty, vrací raw `{ czA, czB, skA, skB }` |
-| `hooks/useHlavniDashboard.tsx` | Context pro Hlavní Dashboard — `market`, `yearA`, `yearB`, `yearOptions`; provider v `ConditionalLayout` |
-| `scripts/updateData.js` | Čistý Node.js — stáhne CSV z Google Sheets, generuje všechny data/*.ts soubory, pak git push |
-| `app/api/update/route.ts` | POST endpoint — admin only; na Vercelu volá Deploy Hook, lokálně spustí skript |
+| `scripts/importData.js` | Import objednávek + nákladů z Google Sheets do NeonDB |
+| `scripts/migrate.js` | Vytvoření schématu tabulek v NeonDB |
+| `lib/schema.sql` | SQL schéma všech tabulek |
+| `lib/db.ts` | NeonDB pool (pg, ssl: rejectUnauthorized: false) |
+| `hooks/useDashboardData.ts` | Fetch z `/api/dashboard`, agregace KPI + chartData + YoY |
+| `hooks/useFilters.ts` | `FiltersProvider`, `useFilters()`, `getDateRange()`, live EUR kurz |
+| `data/types.ts` | `DailyRecord`, `KpiData`, `FilterState`, `EUR_TO_CZK`, `getDisplayCurrency` |
+| `lib/formatters.ts` | `formatCurrency`, `formatPercent`, `formatNumber`, `formatDate`, `localIsoDate` |
+| `app/api/dashboard/route.ts` | SQL: UNION all_days + LEFT JOIN orders + marketing |
+| `app/api/products/route.ts` | SQL: product_sales → daily + prevTotals |
+| `app/api/shipping/route.ts` | SQL: daily_shipping + daily_payment → ShippingPaymentRecord[] |
+| `app/api/retention/route.ts` | SQL: customer_orders GROUP BY customer_hash → per-customer pole |
+| `app/api/update/route.ts` | Trigger GitHub Actions workflow_dispatch |
+| `.github/workflows/update-data.yml` | Cron 2:00 SEČ + workflow_dispatch → `npm run db:import` |
 
 ### KPI komponenty
 
-Dva typy KPI karet — **neměnit vzájemně**:
-- **`StatCard`** — používají `/margin`, `/retention`, `/crosssell`. Prop `negative` = rose border/barva. Props `yoy`, `hasPrevData`, `invertYoy` pro YoY badge.
-- **`KpiCard`** — používají `/dashboard`, `/orders`, `/marketing`, `/products`, `/shipping`. Podporuje sparkline, YoY badge a `variant`:
-  - `'default'` — modrý rámeček (výchozí)
-  - `'green'` — tmavě zelený rámeček + zelená hodnota (Hrubý zisk)
-  - `'red'` — červený rámeček + červená hodnota (ztráta dopravy)
+Dva typy — **neměnit vzájemně**:
+- **`StatCard`** — `/margin`, `/retention`, `/crosssell`. Props: `yoy`, `hasPrevData`, `invertYoy`, `negative`.
+- **`KpiCard`** — `/dashboard`, `/orders`, `/marketing`, `/products`, `/shipping`. Podporuje sparkline, YoY badge, `variant: 'default' | 'green' | 'red'`.
+
+### Vzorce
+
+**PNO** = `Marketingové investice / Tržby bez DPH × 100`
+
+**Tržby bez DPH** = `Celkem − DPH celkem` (ze Shoptet exportu, sloupec `DPH celkem` — ne fixní sazba)
+
+**product_sales.revenue** = `priceVat × vatRatio × qty` kde `vatRatio = (revenueVat - vatAmount) / revenueVat`
 
 ### `localIsoDate(d: Date)`
 
-Funkce v `lib/formatters.ts` — vrací datum jako `"YYYY-MM-DD"` v **lokálním čase** (bez UTC konverze). Používat všude místo `.toISOString().split('T')[0]`, jinak v CEST (UTC+2) dochází k posunutí data o den zpět.
+Vrací `"YYYY-MM-DD"` v **lokálním čase**. Používat vždy místo `.toISOString().split('T')[0]` — jinak v CEST (UTC+2) dochází k posunutí data o den zpět.
 
-### `/dashboard` — Klíčové ukazatele (KPI)
+### ABC analýza produktů
 
-KPI boxy (11 + 2 ve vlastním řádku): Tržby s/bez DPH, Počet obj., AOV, Marketing. investice, PNO, CPA, Marže, Marže %, Cena za nového zákazníka, Hrubý zisk na objednávku + **samostatný řádek: Hrubý zisk, Hrubý zisk %** (variant='green').
+- **A** — 0–80 % kumulativních tržeb (zelené)
+- **B** — 80–95 % (žluté)
+- **C** — 95–100 % (červené)
 
-**Grafy (4 celkem, 2×2 mřížka):** Tržby+Objednávky, Náklady+PNO, AOV (YoY), Cena za objednávku/CPA (YoY) — komponenty `AovChart` a `CpaChart` z `components/charts/AovCpaChart.tsx`.
+Klasifikace se počítá vždy ze seřazeného celku, nezávisle na aktuálním řazení tabulky.
 
-**Odstraněno:** Storna, Podíl storen (odstraněno na žádost uživatele).
+### YoY grafy — zarovnání os
 
-Marže a Hrubý zisk se počítají z `marginDataCZ` / `marginDataSK`:
-- `margin = marginRev - purchaseCost`
-- `marginPct = margin / marginRev × 100`
-- `grossProfit = margin - kpi.cost`
-- `grossPct = grossProfit / marginRev × 100`
+`chartData` v `useDashboardData` posouvá prev-year datumy o +1 rok, aby obě série sdílely stejný klíč v mapě. Výsledek: 1 bod na osu X = aktuální + loňská hodnota. Bez tohoto by chart zobrazoval 2× tolik bodů s duplicitními ticklabely.
 
-### `/retention` — Retenční analýza
+### Meziroční srovnání
 
-- **Měsíční graf Noví vs. stávající zákazníci** — 100% stacked bar, hned pod KPI boxy
-  - Data z `computeMonthlyNewVsReturning()` v `lib/retentionUtils.ts`
-  - Zelená = noví (první nákup v daném měsíci), Modrá = stávající (vrátili se)
-  - Osa X: název měsíce + rok (`formatMonthYear`), Osa Y: % podíl
-  - Tooltip zobrazuje skutečné počty zákazníků
-- RFM segmentace, LTV, AOV, repeat purchase rate — beze změny
-
-### `/shipping` — Doprava a platby
-
-**KPI boxy** (8 celkem):
-- `Doprava zákazník` — příjmy od zákazníků za dopravu
-- `Doprava e-shop` — náklady e-shopu dle ceníku dopravců
-- `Doprava zisk / ztráta` — rozdíl; `variant='green'` nebo `'red'`; zobrazuje `'--'` pokud ceník není vyplněn
-- `Doprava zdarma %` — podíl objednávek s dopravou zdarma (revenue_vat === 0 nebo name obsahuje "zdarma"/"free"), **vylučuje Osobní odběr** z obou stran výpočtu
-
-**Graf Doprava zdarma % v čase:**
-- Sloupcový graf respektující přepínač Den/Týden/Měsíc
-- Přerušovaná šedá referenční čára (`ReferenceLine`) na průměrné hodnotě za období
-- Badge "Ø X.X % za období" v pravém horním rohu
-- Umístění: za grafem "Vývoj využitelnosti plateb", před sekcí donutů/tabulek
-- Funkce `isPickup()` jako helper v komponentě (vyloučení Osobního odběru)
-
-**Výpočet free_count (správná logika):**
-- `free_count` se počítá v `aggregateShippingPayment()` v `scripts/updateData.js` na úrovni každé individuální objednávky (před denní agregací)
-- Pokud objednávka má `revVat === 0` na shipping řádku → `free_count++`
-- **Proč ne `revenue_vat === 0` na agregovaném záznamu:** záznamy jsou sečteny za celý den, takže den s mix placenou/zdarma dopravou má `revenue_vat > 0` a stará logika objednávky zdarma přehlédla
-- `ShippingPaymentRecord` interface obsahuje pole `free_count: number`
-- Shipping page používá `r.free_count ?? 0` nikdy ne `revenue_vat === 0`
-
-**Ceník dopravců** — editovatelná tabulka uložená v `localStorage` (`carrierCosts_v1`):
-- Rozdělena na CZ (Kč) a SK (€) sekce
-- Zobrazuje pouze panely odpovídající aktivním selektorům CZ/SK
-- Struktura: `Record<carrierName, { cz: string, sk: string, note: string }>`
-
-**Tabulka Zisk / ztráta per dopravce** — zobrazí se pouze pokud je vyplněn ceník:
-- Sloupce: Dopravce, Obj., Zákazník platí, E-shop platí, Zisk/ztráta, Na objednávku
-- Zákazník platí = z `shippingRows` (agregace za období)
-- E-shop platí = `czCount[name] × costs[name].cz + skCount[name] × costs[name].sk × skMult`
-
-### ABC analýza produktů (`/products`)
-
-Produkty se klasifikují dle kumulativního podílu na tržbách bez DPH (seřazeno sestupně):
-- **A** — top produkty → 0–80 % tržeb (zelené)
-- **B** — střední produkty → 80–95 % tržeb (žluté)
-- **C** — slabé produkty → 95–100 % tržeb (červené)
-
-Klasifikace se vždy počítá ze všech dat (sort dle revenue desc), nezávisle na aktuálním řazení tabulky.
-
-### Distribuce hodnot objednávek (`/orders`)
-
-`orderValueData*` = per-order košík bez DPH (bez dopravy a platby), extrahovaný z col[56] Shoptet exportu.
-- CZK buckety: 0–500, 500–1k, 1k–2k, 2k–5k, 5k+
-- EUR buckety: 0–20, 20–40, 40–80, 80–200, 200+
-- Při kombinaci CZ+SK se SK hodnoty převádí na CZK přes `eurToCzk`.
-- Histogram zobrazuje peak bucket (tmavě modrý) + amber tip na dopravu zdarma.
-
-### Marketing — CPC (`/marketing`)
-
-Data z `getDailyMarketingData()` — každý den má `clicks_facebook`, `clicks_google`, `cost_facebook`, `cost_google`, `revenue`.
-- **CPC** = cost_channel / clicks_channel (per den), zobrazeno na 2 desetinná místa
-- **ROAS byl odstraněn** ze všech přehledů
-- Grafy: ComposedChart (stacked bars kliky + lines CPC)
-- Výkon per channel obsahuje YoY srovnání (FB, Google — náklady, kliky, CPC)
-
-### RFM segmentace zákazníků (`/retention`)
-
-Výpočet v `lib/retentionUtils.ts` → `computeRfmSegments()`. Referenční datum = nejnovější objednávka v datasetu.
-
-| Segment | Podmínka (priority pořadí) |
-|---------|---------------------------|
-| Ztracení | R > 365 dní |
-| Šampioni | F ≥ 3 AND R ≤ 90 dní |
-| Věrní zákazníci | F ≥ 2 AND R ≤ 180 dní |
-| Ohrožení | F ≥ 2 AND R > 180 dní |
-| Noví zákazníci | F = 1 AND R ≤ 90 dní |
-| Jednorázové | F = 1, ostatní |
-
-### Definice Noví vs. Stávající zákazníci (`/retention`)
-
-- **Noví** = zákazník, jehož úplně první nákup je v daném roce
-- **Stávající** = zákazník, který měl v daném roce svůj 2.+ nákup vůbec (zahrnuje i opakované nákupy ve stejném roce)
-- Jeden zákazník **může být v obou kategoriích** v jednom roce (poprvé koupil a vrátil se ve stejném roce)
+- **CZ** — e-shop od května 2025. `hasPrevData = false` pro CZ dokud nejsou data z předchozího roku.
+- **SK** — data od dubna 2024 (testovací objednávky před červnem 2024 jsou v DB ale filtrují se).
 
 ### Filtr období (TopBar)
 
-Dostupné možnosti `TimePeriod` v `data/types.ts`:
-- `yesterday` — Včerejší den
-- `last_7_days` — Posledních 7 dní (dnes − 6 → dnes)
-- `current_month` — Aktuální měsíc
-- `last_month` — Minulý měsíc (1. den – poslední den předchozího měsíce)
-- `last_14_days` — Posledních 14 dní
-- `current_year` — Aktuální rok
-- `last_year` — Minulý rok
-- `all_time` — Celé období (2024-01-01 → dnes; pokryje veškerá SK i CZ data)
-- `custom` — Vlastní období (customStart, customEnd)
-
-Logika datových rozsahů je v `hooks/useFilters.ts` → `getDateRange()`.
+`TimePeriod` v `data/types.ts`: `yesterday`, `last_7_days`, `last_14_days`, `current_month`, `last_month`, `current_year`, `last_year`, `all_time`, `custom`.
 
 ### Selektor Trh (TopBar)
 
-- Stránky `/shipping` a `/analytics` mají skrytou možnost **Vše** — zobrazují pouze CZ a SK.
-- Stránky `/retention` a `/crosssell` mají selektor trhu zcela skrytý.
-- Ostatní stránky zobrazují všechny tři možnosti (Vše, CZ, SK).
+- `/shipping`, `/analytics`, `/meta`: skryta možnost **Vše** (pouze CZ / SK)
+- `/retention`, `/crosssell`: selektor zcela skrytý
 
-### Konstanta `TODAY` (defaulty pro datum)
+### Bezpečnost — emaily zákazníků
 
-`hooks/useFilters.ts` používá aktuální datum dynamicky:
-```ts
-const TODAY = new Date();
-```
+E-maily jsou **hashované SHA-256** ihned při importu v `scripts/importData.js`. Plaintext email se nikdy neukládá do DB ani nikam neposílá. Tabulka `customer_orders` obsahuje pouze `customer_hash`.
 
-Pokud řešíš funkce závislé na čase (např. "posledních 7 dní"), drž logiku dat na jednom místě (`hooks/useFilters.ts` / `getDateRange()`) a počítej s hraničními efekty časových pásem při groupingu po dnech.
+### Meta Ads (`/meta`)
 
-### Vzorec PNO
+- Jeden ad account `META_AD_ACCOUNT_ID` (ne oddělené CZ/SK)
+- Token v `.env.local` je Sardinerie token — nemá přístup k Zboží z Bali účtu
+- **Čeká na:** přidání System Usera do Meta Business Manageru Zboží z Bali + nový token
 
-`PNO = Marketingové investice / Tržby bez DPH × 100`
+### Stránky stále na statických datech (čeká na migraci)
 
-(marketingové náklady dělené tržbami bez DPH; v jmenovateli není DPH)
-
-### Hourly data
-
-Hourly grid na stránce `/behavior` je **all-time agregace** — nezohledňuje vybrané časové období filtrů. Jde o záměrné rozhodnutí pro zachycení dlouhodobého vzorce chování.
-
-### SK marže
-
-Nákupní ceny pro SK nejsou dostupné — `marginDataSK` obsahuje nuly v `costPrice`. Maržový report pro SK je nepřesný.
-
-### SK launch date
-
-SK e-shop spuštěn **1. června 2024**. Data před tímto datem jsou testovací objednávky a nesmí vstupovat do žádných reportů.
-
-Konstanta `SK_LAUNCH_DATE = '2024-06-01'` v `data/types.ts` — používat všude jako filtr SK dat.
-
-**Filtrování je aplikováno na těchto místech:**
-- `data/mockGenerator.ts` — `mockData` obsahuje SK záznamy pouze od `SK_LAUNCH_DATE`; mock data pro SK zcela odstraněna (e-shop před červnem 2024 neexistoval)
-- `app/dashboard/page.tsx` — `marginDataSK`
-- `app/hlavni-dashboard/page.tsx` — `marginDataSK`
-- `app/margin/page.tsx` — `marginDataSK`, `realDataSK`
-- `app/orders/page.tsx` — `orderValueDataSK`
-- `app/shipping/page.tsx` — `shippingPaymentDataSK`
-- `app/retention/page.tsx` — zákazníci s prvním nákupem před `SK_LAUNCH_DATE` vyloučeni
-
-**Při přidávání nových SK datasetů** vždy filtrovat: `data.filter(r => r.date >= SK_LAUNCH_DATE)`.
-
-### GA4
-
-GA4 je napojeno pro **CZ i SK**. `/analytics` stránka zobrazuje pouze CZ; Hlavní Dashboard (`/api/analytics/cvr-monthly`) fetchuje obě property.
-
-**`app/api/analytics/route.ts`** — vrací:
-- `daily`, `dailyPrev` — denní sessions/users/conversions/bounceRate/avgDuration
-- `totals` — agregáty za aktuální + předchozí rok (dva dateRanges v jednom requestu)
-- `sources`, `sourcesPrev` — zdroje návštěvnosti (source/medium, top 20)
-- `devices`, `devicesPrev` — rozpad na deviceCategory
-- `landingPages` — vstupní stránky (top 20)
-- `funnel` — checkout trychtýř agregát: begin_checkout → add_shipping_info → add_payment_info → purchase, rozpad desktop/mobile/tablet
-- `funnelTrend` — denní průchodnost košíkem; každý řádek má klíče `${step}_${device}` a `${step}_all`
-
-**`app/analytics/page.tsx`**:
-- KPI boxy: Sessions, Unikátní uživatelé, Konverze, Konverzní poměr, Bounce rate, Prům. délka — grid `grid-cols-2 sm:grid-cols-3`
-- Grafy v čase: Sessions YoY, Konverzní poměr YoY, Bounce rate YoY, Délka návštěvy YoY
-- Zdroje návštěvnosti (progress bary, YoY badge) + Zařízení (PieChart + YoY badge)
-- **Graf CVR trychtýře v čase** (`funnelTrendPct`): zobrazuje jedinou křivku — `purchase / begin_checkout × 100 %` — jak se vyvíjí CVR celého trychtýře v čase; selektor zařízení (Vše / Desktop / Mobil / Tablet); Y-osa 0–100 %, každý bod počítán relativně k `begin_checkout_${device}` daného dne
-- **Trychtýř průchodnosti košíkem** (statický): stacked bar per krok, % z 1. kroku, odpad mezi kroky, rozpad desktop/mobile/tablet
-
-### Autentizace
-
-NextAuth 5 (beta). Uživatelé jsou uloženi v `data/users.json` (bcrypt hesla). Admin stránka `/admin/users` vyžaduje `role: 'admin'`.
-
-- Tlačítko **Aktualizovat data** v TopBaru je viditelné **pouze adminům** (kontrola přes `useSession`)
-- Ostatní uživatelé tlačítko nevidí
-
-### Názvy měsíců v grafech
-
-Grafy s rozpadem po měsících zobrazují české zkratky měsíců (`formatMonthYear` z `lib/formatters.ts`), ne číselný formát.
-
-- **`/margin`** — useMemo vrací `isMonthly: dayCount > 60`; komponenta volí `dateTickFormatter = isMonthly ? formatMonthYear : formatShortDate` pro osu X i tooltip (`MarzeTooltip` přijímá prop `isMonthly`)
-- **`/shipping`** — `formatPeriodLabel(key, 'month')` vrací `Bře 2024` pomocí lokální konstanty `MONTHS_CS`
-- **`/retention`** — měsíční graf Noví vs. stávající zákazníci vždy používá `formatMonthYear`
-
-### Branding a název aplikace
-
-- Název aplikace: **Manažerský reporting** (sidebar, login stránka, browser tab)
-- Logo: `public/logo.png` (Sardinerie Fish Boutique, modré logo na bílém pozadí)
-- Logo je zobrazeno v sidebaru a na login stránce
-- Sidebar: logo v bílém kontejneru + text "Manažerský / reporting" pod ním
-
-### Sidebar — navigační struktura (`components/layout/Sidebar.tsx`)
-
-Položky jsou organizovány do skupin `navGroups` se sekčními hlavičkami:
-
-| Sekce | Položky (label → href) |
-|-------|------------------------|
-| Strategický přehled | Hlavní Dashboard → `/hlavni-dashboard`, Hlavní KPI → `/dashboard`, Marketingový Mix & PNO → `/marketing` |
-| Prodej a profitabilita | Výkon prodeje → `/orders`, Analýza marží → `/margin`, Doprava a platba → `/shipping` |
-| Produktová analytika | Produktový žebříček → `/products`, Cross-sell potenciál → `/crosssell`, Stav skladu → `/stock` |
-| Zákazníci a retence | Nákupní chování → `/behavior`, Retenční analýza → `/retention` |
-| Akvizice a kanály | Webová návštěvnost (GA4) → `/analytics`, Meta Ads → `/meta`, Google Ads → `/google-ads` |
-| Admin (admin only) | Správa uživatelů → `/admin/users` |
-
-### `/meta` — Meta Ads
-
-Stránka volá `app/api/meta/route.ts` který fetchuje Meta Marketing API v21.0.
-
-**Env proměnné:**
-```
-META_ACCESS_TOKEN=...          # System User token (trvalý)
-META_AD_ACCOUNT_ID_CZ=act_...  # CZ reklamní účet
-META_AD_ACCOUNT_ID_SK=act_...  # SK reklamní účet
-```
-
-**Filtr MyFish:** Kampaně obsahující `"myfish"` (case-insensitive) jsou **vyloučeny ze všech metrik** — KPI, denní grafy i tabulka kreativ. Konstanta `EXCLUDE_CAMPAIGN = 'myfish'` v `route.ts`.
-
-**KPI agregace:** Počítá se na úrovni `level=campaign` (ne account-level), aby šlo filtrovat MyFish před součtem.
-
-**Selektor trhu:** Přepíná mezi CZ a SK Ad Account. Možnost "Vše" je skryta (stejně jako `/analytics`) — Meta má oddělené účty per trh.
-
-**Tabulka kreativ:** Filtrovatelná dle kampaně a sady reklam (dropdowny nad tabulkou). Výběr kampaně resetuje filtr sady reklam a nabízí pouze relevantní sady.
-
-**YoY:** API fetchuje předchozí rok posunutím `time_range` o -1 rok. YoY badge zobrazuje % změnu; pro Útrata/CPA/CPC je logika invertovaná (pokles = zelená).
+Tyto stránky stále čtou ze statických `data/*.ts` souborů (generovaných starým `updateData.js`, který produkuje prázdná data):
+- `/margin` — `marginDataCZ/SK`
+- `/behavior` — `hourlyDataCZ/SK` (NeonDB tabulka `hourly_behavior` je naplněna)
+- `/orders` (histogram) — `orderValueDataCZ/SK`
+- `/crosssell` — `crossSellDataCZ/SK`
 
 ### Pre-existing TS chyby
 
-`app/shipping/page.tsx` má ~8 TS chyb (Recharts PieLabel + Tooltip typy). Jsou **pre-existující**, nezpůsobené nedávnými změnami — neřešit, pokud se nerefaktoruje shipping stránka.
+`app/shipping/page.tsx` má ~8 TS chyb (Recharts PieLabel + Tooltip typy). Jsou pre-existující — neřešit pokud se nerefaktoruje shipping stránka.

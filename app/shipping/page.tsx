@@ -2,12 +2,18 @@
 
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useFilters, getDateRange } from '@/hooks/useFilters';
-import { shippingPaymentDataCZ } from '@/data/shippingPaymentDataCZ';
-import { shippingPaymentDataSK as _shippingPaymentDataSK } from '@/data/shippingPaymentDataSK';
 import { getDisplayCurrency, SK_LAUNCH_DATE } from '@/data/types';
-
-const shippingPaymentDataSK = _shippingPaymentDataSK.filter(r => r.date >= SK_LAUNCH_DATE);
 import { formatCurrency, formatNumber, formatDate, localIsoDate } from '@/lib/formatters';
+
+interface ShippingPaymentRecord {
+  date: string;
+  market: string;
+  type: 'shipping' | 'payment';
+  name: string;
+  count: number;
+  free_count: number;
+  revenue_vat: number;
+}
 import { Truck, CreditCard, DollarSign, Banknote, Star, Award, Gift, Save, RotateCcw } from 'lucide-react';
 
 const LS_KEY = 'carrierCosts_v1';
@@ -186,6 +192,14 @@ function PieLegend({ rows, palette, total }: {
 export default function ShippingPage() {
   const { filters, eurToCzk } = useFilters();
   const [period, setPeriod] = useState<Period>('day');
+  const [allData, setAllData] = useState<ShippingPaymentRecord[]>([]);
+
+  useEffect(() => {
+    fetch('/api/shipping')
+      .then(r => r.json())
+      .then((data: ShippingPaymentRecord[]) => setAllData(data))
+      .catch(console.error);
+  }, []);
 
   const { start, end, prevStart, prevEnd } = getDateRange(filters);
   const startStr     = localIsoDate(start);
@@ -201,42 +215,36 @@ export default function ShippingPage() {
 
   // ── Merge CZ + SK ──────────────────────────────────────────────────────────
   const records = useMemo(() => {
-    const out: { date: string; type: 'shipping' | 'payment'; name: string; count: number; free_count: number; revenue_vat: number }[] = [];
-    if (filters.countries.includes('cz')) {
-      for (const r of shippingPaymentDataCZ) {
-        if (r.date < startStr || r.date > endStr) continue;
-        out.push({ ...r });
-      }
-    }
-    if (filters.countries.includes('sk')) {
-      for (const r of shippingPaymentDataSK) {
-        if (r.date < startStr || r.date > endStr) continue;
-        out.push({ ...r, revenue_vat: r.revenue_vat * skMult });
-      }
-    }
-    return out;
-  }, [filters.countries, startStr, endStr, skMult]);
+    return allData
+      .filter(r => {
+        const market = r.market.toLowerCase();
+        if (!filters.countries.includes(market === 'cz' ? 'cz' : 'sk')) return false;
+        if (r.date < SK_LAUNCH_DATE && market === 'sk') return false;
+        return r.date >= startStr && r.date <= endStr;
+      })
+      .map(r => ({
+        ...r,
+        revenue_vat: r.market === 'SK' && !onlySK ? r.revenue_vat * skMult : r.revenue_vat,
+      }));
+  }, [allData, filters.countries, startStr, endStr, skMult, onlySK]);
 
   const shipping = records.filter(r => r.type === 'shipping');
   const payment  = records.filter(r => r.type === 'payment');
 
   // ── Prev year records ──────────────────────────────────────────────────────
   const prevRecords = useMemo(() => {
-    const out: { date: string; type: 'shipping' | 'payment'; name: string; count: number; free_count: number; revenue_vat: number }[] = [];
-    if (filters.countries.includes('cz')) {
-      for (const r of shippingPaymentDataCZ) {
-        if (r.date < prevStartStr || r.date > prevEndStr) continue;
-        out.push({ ...r });
-      }
-    }
-    if (filters.countries.includes('sk')) {
-      for (const r of shippingPaymentDataSK) {
-        if (r.date < prevStartStr || r.date > prevEndStr) continue;
-        out.push({ ...r, revenue_vat: r.revenue_vat * skMult });
-      }
-    }
-    return out;
-  }, [filters.countries, prevStartStr, prevEndStr, skMult]);
+    return allData
+      .filter(r => {
+        const market = r.market.toLowerCase();
+        if (!filters.countries.includes(market === 'cz' ? 'cz' : 'sk')) return false;
+        if (r.date < SK_LAUNCH_DATE && market === 'sk') return false;
+        return r.date >= prevStartStr && r.date <= prevEndStr;
+      })
+      .map(r => ({
+        ...r,
+        revenue_vat: r.market === 'SK' && !onlySK ? r.revenue_vat * skMult : r.revenue_vat,
+      }));
+  }, [allData, filters.countries, prevStartStr, prevEndStr, skMult, onlySK]);
 
   const prevShipping = prevRecords.filter(r => r.type === 'shipping');
   const prevPayment  = prevRecords.filter(r => r.type === 'payment');
@@ -376,10 +384,9 @@ export default function ShippingPage() {
 
   // ── Carrier cost table ─────────────────────────────────────────────────────
   const allCarriers = useMemo(() => {
-    const czNames = new Set(shippingPaymentDataCZ.filter(r => r.type === 'shipping').map(r => r.name));
-    const skNames = new Set(shippingPaymentDataSK.filter(r => r.type === 'shipping').map(r => r.name));
-    return [...new Set([...czNames, ...skNames])].sort();
-  }, []);
+    const names = new Set(allData.filter(r => r.type === 'shipping').map(r => r.name));
+    return [...names].sort();
+  }, [allData]);
 
   const [costs, setCosts] = useState<Record<string, CarrierCost>>({});
   const [saved, setSaved] = useState(false);
@@ -395,22 +402,15 @@ export default function ShippingPage() {
   // E-shop shipping cost = sum(count * pricePerCarrier) for the current period
   const eshopShippingCost = useMemo(() => {
     let total = 0;
-    if (filters.countries.includes('cz')) {
-      for (const r of shippingPaymentDataCZ) {
-        if (r.type !== 'shipping' || r.date < startStr || r.date > endStr) continue;
-        const price = Number(costs[r.name]?.cz) || 0;
-        total += r.count * price;
-      }
-    }
-    if (filters.countries.includes('sk')) {
-      for (const r of shippingPaymentDataSK) {
-        if (r.type !== 'shipping' || r.date < startStr || r.date > endStr) continue;
-        const price = Number(costs[r.name]?.sk) || 0;
-        total += r.count * price * skMult;
-      }
+    for (const r of allData) {
+      if (r.type !== 'shipping' || r.date < startStr || r.date > endStr) continue;
+      const market = r.market.toLowerCase();
+      if (!filters.countries.includes(market === 'cz' ? 'cz' : 'sk')) continue;
+      const price = r.market === 'CZ' ? Number(costs[r.name]?.cz) || 0 : (Number(costs[r.name]?.sk) || 0) * skMult;
+      total += r.count * price;
     }
     return total;
-  }, [costs, filters.countries, startStr, endStr, skMult]);
+  }, [allData, costs, filters.countries, startStr, endStr, skMult]);
 
   const shippingProfitLoss = totalShippingRev - eshopShippingCost;
   const hasAnyCost = Object.values(costs).some(c => Number(c.cz) > 0 || Number(c.sk) > 0);
@@ -420,17 +420,12 @@ export default function ShippingPage() {
     // Build per-carrier CZ/SK counts for current period
     const czCount: Record<string, number> = {};
     const skCount: Record<string, number> = {};
-    if (filters.countries.includes('cz')) {
-      for (const r of shippingPaymentDataCZ) {
-        if (r.type !== 'shipping' || r.date < startStr || r.date > endStr) continue;
-        czCount[r.name] = (czCount[r.name] || 0) + r.count;
-      }
-    }
-    if (filters.countries.includes('sk')) {
-      for (const r of shippingPaymentDataSK) {
-        if (r.type !== 'shipping' || r.date < startStr || r.date > endStr) continue;
-        skCount[r.name] = (skCount[r.name] || 0) + r.count;
-      }
+    for (const r of allData) {
+      if (r.type !== 'shipping' || r.date < startStr || r.date > endStr) continue;
+      const market = r.market.toLowerCase();
+      if (!filters.countries.includes(market === 'cz' ? 'cz' : 'sk')) continue;
+      if (r.market === 'CZ') czCount[r.name] = (czCount[r.name] || 0) + r.count;
+      else skCount[r.name] = (skCount[r.name] || 0) + r.count;
     }
     // Merge all carrier names
     const names = [...new Set([...Object.keys(czCount), ...Object.keys(skCount)])];
@@ -845,7 +840,7 @@ export default function ShippingPage() {
                 </tr>
               </thead>
               <tbody>
-                {allCarriers.filter(n => shippingPaymentDataCZ.some(r => r.type === 'shipping' && r.name === n)).map((name, idx) => {
+                {allCarriers.filter(n => allData.some(r => r.market === 'CZ' && r.type === 'shipping' && r.name === n)).map((name, idx) => {
                   const c = costs[name] ?? { cz: '', sk: '', note: '' };
                   return (
                     <tr key={name} className={`border-b border-slate-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}`}>
@@ -885,7 +880,7 @@ export default function ShippingPage() {
                 </tr>
               </thead>
               <tbody>
-                {allCarriers.filter(n => shippingPaymentDataSK.some(r => r.type === 'shipping' && r.name === n)).map((name, idx) => {
+                {allCarriers.filter(n => allData.some(r => r.market === 'SK' && r.type === 'shipping' && r.name === n)).map((name, idx) => {
                   const c = costs[name] ?? { cz: '', sk: '', note: '' };
                   return (
                     <tr key={name} className={`border-b border-slate-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}`}>
