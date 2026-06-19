@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS hourly_behavior (
   day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
   hour        SMALLINT NOT NULL CHECK (hour BETWEEN 0 AND 23),
   order_count INTEGER  NOT NULL DEFAULT 0,
+  revenue     NUMERIC  NOT NULL DEFAULT 0,
   PRIMARY KEY (market, day_of_week, hour)
 );
 

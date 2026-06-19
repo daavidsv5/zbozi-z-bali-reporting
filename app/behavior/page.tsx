@@ -1,13 +1,10 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useEffect, useState } from 'react';
 import { TrendingUp, TrendingDown } from 'lucide-react';
 import { useFilters, getDateRange } from '@/hooks/useFilters';
-import { mockData } from '@/data/mockGenerator';
 import { getDisplayCurrency, EUR_TO_CZK } from '@/data/types';
 import { formatCurrency, formatPercent, formatDate, localIsoDate } from '@/lib/formatters';
-import { hourlyDataCZ } from '@/data/hourlyDataCZ';
-import { hourlyDataSK } from '@/data/hourlyDataSK';
 import {
   BarChart,
   Bar,
@@ -21,7 +18,22 @@ import { C } from '@/lib/chartColors';
 
 const DAY_NAMES = ['Neděle', 'Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota'];
 const DAY_SHORT = ['Ne', 'Po', 'Út', 'St', 'Čt', 'Pá', 'So'];
-const DAY_ORDER  = [1, 2, 3, 4, 5, 6, 0]; // Mon → Sun
+const DAY_ORDER  = [1, 2, 3, 4, 5, 6, 0]; // Po → Ne
+
+interface DailyRow {
+  date: string;
+  market: 'CZ' | 'SK';
+  revenue: number;
+  order_count: number;
+}
+
+interface HourlyRow {
+  market: 'CZ' | 'SK';
+  day_of_week: number;
+  hour: number;
+  order_count: number;
+  revenue: number;
+}
 
 function formatYAxis(v: number, cur: 'CZK' | 'EUR') {
   const s = cur === 'EUR' ? '€' : 'Kč';
@@ -40,28 +52,44 @@ export default function BehaviorPage() {
 
   const currency = getDisplayCurrency(filters.countries);
   const fc = (v: number) => formatCurrency(v, currency);
-  const mult = (cur: 'CZK' | 'EUR') =>
-    currency === 'CZK' && cur === 'EUR' ? (eurToCzk ?? EUR_TO_CZK) : 1;
+  const eur = eurToCzk ?? EUR_TO_CZK;
 
-  // Filter mockData by date range + selected countries
-  const filtered = useMemo(
-    () =>
-      mockData.filter(
-        r => r.date >= startStr && r.date <= endStr && filters.countries.includes(r.country)
-      ),
-    [startStr, endStr, filters.countries]
-  );
+  const [daily,  setDaily]  = useState<DailyRow[]>([]);
+  const [hourly, setHourly] = useState<HourlyRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    const market = filters.countries.length === 1 ? filters.countries[0].toUpperCase() : '';
+    const params = new URLSearchParams({ start: startStr, end: endStr });
+    if (market) params.set('market', market);
+
+    fetch(`/api/behavior?${params}`, { credentials: 'include' })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(data => {
+        setDaily(data.daily ?? []);
+        setHourly(data.hourly ?? []);
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [startStr, endStr, filters.countries]);
+
+  const revMult = (market: 'CZ' | 'SK') => market === 'SK' ? eur : 1;
 
   // Aggregate by weekday
   const stats = useMemo(() => {
     const agg: Record<number, { orders: number; revenue: number; days: Set<string> }> = {};
     for (let d = 0; d < 7; d++) agg[d] = { orders: 0, revenue: 0, days: new Set() };
 
-    for (const r of filtered) {
+    for (const r of daily) {
       const dow = new Date(r.date + 'T12:00:00').getDay();
-      const m   = mult(r.currency);
-      agg[dow].orders  += r.orders;
-      agg[dow].revenue += r.revenue * m;
+      agg[dow].orders  += Number(r.order_count);
+      agg[dow].revenue += Number(r.revenue) * revMult(r.market);
       agg[dow].days.add(r.date);
     }
 
@@ -75,42 +103,11 @@ export default function BehaviorPage() {
       avgOrders:  agg[d].days.size > 0 ? agg[d].orders  / agg[d].days.size : 0,
       avgRevenue: agg[d].days.size > 0 ? agg[d].revenue / agg[d].days.size : 0,
     }));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, currency, eurToCzk]);
+  }, [daily, eur]);
 
   const totalOrders  = stats.reduce((s, r) => s + r.orders,  0);
   const totalRevenue = stats.reduce((s, r) => s + r.revenue, 0);
-
-  // ── Hourly data (all-time, filtered by country) — single avg line ────────
-  const hourlyChartData = useMemo(() => {
-    const isCZOnly = filters.countries.length === 1 && filters.countries[0] === 'cz';
-    const isSKOnly = filters.countries.length === 1 && filters.countries[0] === 'sk';
-    const eur = eurToCzk ?? EUR_TO_CZK;
-
-    // totalRevenue[h] and totalDays[h] across all days of week
-    const totRev  = new Array(24).fill(0);
-    const totDays = new Array(24).fill(0);
-
-    const source = isSKOnly ? hourlyDataSK : isCZOnly ? hourlyDataCZ : null;
-
-    if (source) {
-      for (const p of source) {
-        const rev = isSKOnly ? p.totalRevenue : p.totalRevenue;
-        totRev[p.hour]  += rev;
-        totDays[p.hour] += p.dayCount;
-      }
-    } else {
-      // Vše: CZ in CZK + SK converted to CZK
-      for (const p of hourlyDataCZ) { totRev[p.hour] += p.totalRevenue;         totDays[p.hour] += p.dayCount; }
-      for (const p of hourlyDataSK) { totRev[p.hour] += p.totalRevenue * eur; totDays[p.hour] += p.dayCount; }
-    }
-
-    return Array.from({ length: 24 }, (_, h) => ({
-      hour:    `${h}:00`,
-      revenue: totDays[h] > 0 ? Math.round(totRev[h] / totDays[h]) : 0,
-    }));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.countries, eurToCzk]);
+  const totalDays    = new Set(daily.map(r => r.date)).size;
 
   const strongest = [...stats].sort((a, b) => b.avgRevenue - a.avgRevenue)[0];
   const weakest   = [...stats].sort((a, b) => a.avgRevenue - b.avgRevenue)[0];
@@ -121,6 +118,39 @@ export default function BehaviorPage() {
     orders:   Math.round(r.avgOrders  * 10) / 10,
     revenue:  Math.round(r.avgRevenue),
   }));
+
+  // Hourly chart — all-time, aggregated across days of week
+  const hourlyChartData = useMemo(() => {
+    const totRev  = new Array(24).fill(0);
+    const totDays = new Array(24).fill(0);
+
+    for (const p of hourly) {
+      const mult = p.market === 'SK' ? eur : 1;
+      totRev[p.hour]  += Number(p.revenue) * mult;
+      totDays[p.hour] += Number(p.order_count);
+    }
+
+    return Array.from({ length: 24 }, (_, h) => ({
+      hour:    `${h}:00`,
+      revenue: totDays[h] > 0 ? Math.round(totRev[h] / totDays[h]) : 0,
+    }));
+  }, [hourly, eur]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64 text-slate-400 text-sm">
+        Načítám data…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-64 text-rose-500 text-sm">
+        Chyba při načítání dat: {error}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -284,12 +314,12 @@ export default function BehaviorPage() {
                 <td className="px-4 py-3 text-blue-500 text-xs">Celkem</td>
                 <td className="px-4 py-3 text-right text-slate-700">{totalOrders.toLocaleString('cs-CZ')}</td>
                 <td className="px-4 py-3 text-right text-slate-600">
-                  {filtered.length > 0 ? (totalOrders / (new Set(filtered.map(r => r.date)).size || 1)).toFixed(1) : '—'}
+                  {totalDays > 0 ? (totalOrders / totalDays).toFixed(1) : '—'}
                 </td>
                 <td className="px-4 py-3 text-right text-slate-600">{formatPercent(100, 1)}</td>
                 <td className="px-4 py-3 text-right text-slate-700">{fc(totalRevenue)}</td>
                 <td className="px-4 py-3 text-right text-slate-600">
-                  {filtered.length > 0 ? fc(totalRevenue / (new Set(filtered.map(r => r.date)).size || 1)) : '—'}
+                  {totalDays > 0 ? fc(totalRevenue / totalDays) : '—'}
                 </td>
               </tr>
             </tfoot>

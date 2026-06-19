@@ -12,10 +12,21 @@ const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
 
+// ── Load .env.local ───────────────────────────────────────────────────────────
+try {
+  const envContent = fs.readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8');
+  for (const line of envContent.split('\n')) {
+    const m = line.match(/^([^#=\s][^=]*)=(.*)/);
+    if (m) {
+      const key = m[1].trim();
+      if (!process.env[key]) process.env[key] = m[2].trim();
+    }
+  }
+} catch (_) { /* .env.local not found — rely on process.env */ }
+
 // ── Google Sheets export URLs ─────────────────────────────────────────────────
 const SHEETS = {
-  orders_cz: 'https://docs.google.com/spreadsheets/d/1vUJ68JjiMV9l84uKKg2rxq87sEHBXmpIls-MC3AimOs/export?format=csv&gid=2005387418',
-  orders_sk: 'https://docs.google.com/spreadsheets/d/1vUJ68JjiMV9l84uKKg2rxq87sEHBXmpIls-MC3AimOs/export?format=csv&gid=761897292',
+  orders:    process.env.ORDERS_SHEET_URL || '',  // kombinovaný CZ+SK sheet
   cost_cz:   'https://docs.google.com/spreadsheets/d/1_MxcTgp5xdbHbNPaUvxklkPlFK28YRcM0ZAbol8X0Y8/export?format=csv&gid=0',
   cost_sk:   'https://docs.google.com/spreadsheets/d/1_MxcTgp5xdbHbNPaUvxklkPlFK28YRcM0ZAbol8X0Y8/export?format=csv&gid=1166854505',
   margin_cz: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vROLHO9ec0unwiL-moal4aGhS_XBRoHBoQhgBltrEP5Li-bJ6vYIJCWLEgDjk02Hlf_eBaoUuy-MWkk/pub?output=csv',
@@ -71,6 +82,72 @@ function parseCSV(content) {
 }
 
 const parseNum = s => parseFloat((s || '0').replace(',', '.')) || 0;
+
+// ── Date helpers (Shoptet Google Sheets export uses Czech format dd.mm.yyyy) ──
+function parseDateFromCol(s) {
+  if (!s) return '';
+  const cz = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (cz) return `${cz[3]}-${cz[2].padStart(2, '0')}-${cz[1].padStart(2, '0')}`;
+  return s.substring(0, 10); // fallback: ISO prefix
+}
+
+function parseHourFromCol(s) {
+  if (!s) return -1;
+  // Czech: "25.5.2025 12:00:00" → time after space
+  const cz = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):/);
+  if (cz) return parseInt(cz[4], 10);
+  // ISO: "2025-05-25 12:00:00" or "2025-05-25T12:00:00"
+  return parseInt(s.substring(11, 13), 10);
+}
+
+// ── Split combined orders CSV (CZ+SK) by Měna column ─────────────────────────
+function splitCSVByMarket(csv) {
+  const lines = csv.split('\n');
+  if (lines.length < 2) return { czCsv: csv, skCsv: lines[0] || '' };
+
+  const headerLine = lines[0];
+  // Parse header to find Měna column index
+  const headers = [];
+  let cur = '', inQ = false;
+  for (const c of headerLine) {
+    if (c === '"') { inQ = !inQ; }
+    else if (c === ',' && !inQ) { headers.push(cur.trim()); cur = ''; }
+    else { cur += c; }
+  }
+  headers.push(cur.trim());
+
+  // Normalize: strip BOM and whitespace
+  const normalizedHeaders = headers.map(h => h.replace(/^﻿/, '').trim());
+  const menaIdx = normalizedHeaders.findIndex(h =>
+    h === 'Měna' || h === 'Mena' || h.toLowerCase() === 'měna' || h.toLowerCase() === 'currency'
+  );
+
+  if (menaIdx < 0) {
+    log('WARNING: Měna column not found in header — treating all orders as CZ');
+    return { czCsv: csv, skCsv: headerLine };
+  }
+
+  const czLines = [headerLine];
+  const skLines = [headerLine];
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const cols = [];
+    let c2 = '', inQ2 = false;
+    for (const c of line) {
+      if (c === '"') { inQ2 = !inQ2; }
+      else if (c === ',' && !inQ2) { cols.push(c2); c2 = ''; }
+      else { c2 += c; }
+    }
+    cols.push(c2);
+    if ((cols[menaIdx] || '').trim() === 'EUR') skLines.push(line);
+    else czLines.push(line);
+  }
+
+  log(`splitCSVByMarket: ${czLines.length - 1} CZ rows, ${skLines.length - 1} SK rows`);
+  return { czCsv: czLines.join('\n'), skCsv: skLines.join('\n') };
+}
 
 // ── Doprava / platba normalization ────────────────────────────────────────────
 // In Shoptet exports, shipping + payment lines can appear in the "product name"
@@ -165,7 +242,7 @@ function aggregateOrders(csv, eurMultiplier = 1) {
     if (cols.length < 57) continue;
     const code   = cols[0];
     const status = cols[2];
-    const date   = cols[1].substring(0, 10);
+    const date   = parseDateFromCol(cols[1]);
 
     if (!byDay[date]) byDay[date] = { orders: 0, orders_cancelled: 0, revenue_vat: 0, revenue: 0 };
 
@@ -210,7 +287,7 @@ function aggregateProducts(csv, eurMultiplier = 1) {
     const code = cols[0];
     if (cancelledCodes.has(code)) continue;
 
-    const date   = cols[1].substring(0, 10);
+    const date   = parseDateFromCol(cols[1]);
     const name   = normalizeDeliveryPaymentName(cols[43]);
     const amount = parseNum(cols[44]);
     const revVat = parseNum(cols[55]) * eurMultiplier;
@@ -394,7 +471,7 @@ export const ${varName}: MarginDailyRecord[] = ${JSON.stringify(records, null, 2
 }
 
 // ── Hourly behaviour processing ───────────────────────────────────────────────
-// cols[1] = "YYYY-MM-DD HH:MM:SS"  → hour = cols[1].substring(11,13)
+// cols[1] = date+time (ISO or Czech format) → use parseDateFromCol / parseHourFromCol
 // Result: 7×24 grid (dayOfWeek × hour) with totalRevenue, totalOrders, dayCount
 
 function aggregateHourly(csv) {
@@ -416,7 +493,7 @@ function aggregateHourly(csv) {
     if (cancelledCodes.has(code)) continue;
     if (seenForDates.has(code)) continue;
     seenForDates.add(code);
-    const date = (cols[1] || '').substring(0, 10);
+    const date = parseDateFromCol(cols[1]);
     if (!date || date.length < 10) continue;
     const dow = new Date(date + 'T12:00:00').getDay();
     dayDateSets[dow].add(date);
@@ -429,10 +506,8 @@ function aggregateHourly(csv) {
     const code = cols[0];
     if (cancelledCodes.has(code)) continue;
 
-    const dateStr = cols[1] || '';
-    const date    = dateStr.substring(0, 10);
-    const hourStr = dateStr.substring(11, 13);
-    const hour    = parseInt(hourStr, 10);
+    const date = parseDateFromCol(cols[1]);
+    const hour = parseHourFromCol(cols[1]);
 
     if (!date || date.length < 10 || isNaN(hour) || hour < 0 || hour > 23) continue;
 
@@ -606,7 +681,7 @@ function aggregateShippingPayment(csv, eurMultiplier = 1) {
     const code = cols[0];
     if (cancelledCodes.has(code)) continue;
 
-    const date     = cols[1].substring(0, 10);
+    const date     = parseDateFromCol(cols[1]);
     const rawName  = cols[43];
     const itemCode = (cols[45] || '').trim().toUpperCase();
     const revVat   = parseNum(cols[55]) * eurMultiplier;
@@ -684,7 +759,7 @@ function aggregateOrderValues(csv) {
     if (cancelledCodes.has(code)) continue;
     if (isBillingOrShippingItem(cols[45])) continue;
 
-    const date  = cols[1].substring(0, 10);
+    const date  = parseDateFromCol(cols[1]);
     const value = parseNum(cols[56]); // itemTotalPriceWithoutVat
 
     if (!orderData.has(code)) orderData.set(code, { date, value: 0 });
@@ -733,7 +808,7 @@ function aggregateRetention(csv) {
     if (!email) continue;
     if (EXCLUDED_STATUSES.has(status)) continue;
 
-    const date   = cols[1].substring(0, 10);
+    const date   = parseDateFromCol(cols[1]);
 
     if (!orderTotals.has(code)) {
       orderTotals.set(code, { email, date, revVat: 0, rev: 0 });
@@ -826,11 +901,14 @@ async function main() {
   log('=== Data update started ===');
 
   try {
+    if (!SHEETS.orders) {
+      throw new Error('ORDERS_SHEET_URL není nastavená — zkontroluj .env.local');
+    }
+
     // Download all sheets in parallel
     log('Downloading Google Sheets...');
-    const [csvOrdersCZ, csvOrdersSK, csvCostCZ, csvCostSK, csvMarginCZ, csvMarginSK, csvStockCZ, csvStockSK] = await Promise.all([
-      fetchUrl(SHEETS.orders_cz),
-      fetchUrl(SHEETS.orders_sk),
+    const [csvOrdersCombined, csvCostCZ, csvCostSK, csvMarginCZ, csvMarginSK, csvStockCZ, csvStockSK] = await Promise.all([
+      fetchUrl(SHEETS.orders),
       fetchUrl(SHEETS.cost_cz),
       fetchUrl(SHEETS.cost_sk),
       fetchUrl(SHEETS.margin_cz),
@@ -839,6 +917,9 @@ async function main() {
       fetchUrl(SHEETS.stock_sk),
     ]);
     log('Download complete.');
+
+    // Rozdělit kombinovaný sheet na CZ (CZK) a SK (EUR) podle sloupce Měna
+    const { czCsv: csvOrdersCZ, skCsv: csvOrdersSK } = splitCSVByMarket(csvOrdersCombined);
 
     // ── CZ ────────────────────────────────────────────────────────────────────
     const ordersByDayCZ             = aggregateOrders(csvOrdersCZ, 1);          // CZK

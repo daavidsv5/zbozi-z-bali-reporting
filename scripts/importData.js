@@ -7,13 +7,34 @@
 
 const https = require('https');
 const http  = require('http');
+const fs    = require('fs');
+const path  = require('path');
 const crypto = require('crypto');
 const { Pool } = require('pg');
+
+// Load .env.local
+try {
+  const envContent = fs.readFileSync(path.join(__dirname, '..', '.env.local'), 'utf8');
+  for (const line of envContent.split('\n')) {
+    const m = line.match(/^([^#=\s][^=]*)=(.*)/);
+    if (m) { const k = m[1].trim(); if (!process.env[k]) process.env[k] = m[2].trim(); }
+  }
+} catch (_) {}
+
+// Local mode: node importData.js --local <orders.csv>
+const LOCAL_IDX = process.argv.indexOf('--local');
+const LOCAL_MODE = LOCAL_IDX !== -1;
+const LOCAL_ORDERS_FILE = LOCAL_MODE ? process.argv[LOCAL_IDX + 1] : null;
+
+if (LOCAL_MODE && !LOCAL_ORDERS_FILE) {
+  console.error('❌ Chybí cesta k souboru. Použití: node scripts/importData.js --local <cesta/k/orders.csv>');
+  process.exit(1);
+}
 
 const ORDERS_URL = process.env.ORDERS_SHEET_URL;
 const COST_URL   = process.env.COST_SHEET_URL;
 
-if (!ORDERS_URL || !COST_URL) {
+if (!LOCAL_MODE && (!ORDERS_URL || !COST_URL)) {
   console.error('❌ Chybí env proměnné ORDERS_SHEET_URL nebo COST_SHEET_URL');
   process.exit(1);
 }
@@ -86,11 +107,36 @@ function hashEmail(email) {
   return crypto.createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
 }
 
+const MONTH_NAMES = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+
 function parseCzDate(s) {
   if (!s) return null;
-  const [d, m, y] = s.split('.');
-  if (!d || !m || !y) return null;
-  return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  // Czech format: "19.6.2026"
+  const dotMatch = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (dotMatch) {
+    const [, d, m, y] = dotMatch;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  // English format: "Jun 19, 2026"
+  const engMatch = s.match(/^([A-Za-z]{3})\s+(\d{1,2}),?\s*(\d{4})/);
+  if (engMatch) {
+    const m = MONTH_NAMES[engMatch[1]];
+    if (m) return `${engMatch[3]}-${String(m).padStart(2, '0')}-${engMatch[2].padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function parseHour(timeStr) {
+  if (!timeStr) return 0;
+  // "11:01:18 AM" / "01:30:00 PM"
+  const ampm = timeStr.match(/^(\d{1,2}):\d{2}:\d{2}\s*(AM|PM)/i);
+  if (ampm) {
+    let h = parseInt(ampm[1], 10);
+    if (ampm[2].toUpperCase() === 'AM' && h === 12) h = 0;
+    if (ampm[2].toUpperCase() === 'PM' && h !== 12) h += 12;
+    return h;
+  }
+  return parseInt(timeStr.split(':')[0], 10) || 0;
 }
 
 function detectMarket(currency) {
@@ -269,13 +315,13 @@ async function processOrders(rows) {
     }
 
     // hourly_behavior
-    const timeStr = orderTimeMap.get(orderId) || '00:00:00';
-    const hour    = parseInt(timeStr.split(':')[0], 10) || 0;
+    const hour    = parseHour(orderTimeMap.get(orderId) || '00:00:00');
     const jsDow   = new Date(date).getDay();
     const dow     = jsDow === 0 ? 6 : jsDow - 1;
     const hk      = `${market}|${dow}|${hour}`;
-    if (!hourlyMap.has(hk)) hourlyMap.set(hk, { market, dow, hour, orderCount: 0 });
+    if (!hourlyMap.has(hk)) hourlyMap.set(hk, { market, dow, hour, orderCount: 0, revenue: 0 });
     hourlyMap.get(hk).orderCount += 1;
+    hourlyMap.get(hk).revenue    += revenue;
   }
 
   // ── Batch upserts ─────────────────────────────────────────────────────────────
@@ -363,10 +409,10 @@ async function processOrders(rows) {
     for (const mkt of markets) {
       await pool.query('DELETE FROM hourly_behavior WHERE market=$1', [mkt]);
     }
-    const hwCount = await batchUpsert(hwRows, 4,
-      (ph) => `INSERT INTO hourly_behavior (market,day_of_week,hour,order_count) VALUES ${ph}
-                ON CONFLICT (market,day_of_week,hour) DO UPDATE SET order_count=EXCLUDED.order_count`,
-      r => [r.market, r.dow, r.hour, r.orderCount]
+    const hwCount = await batchUpsert(hwRows, 5,
+      (ph) => `INSERT INTO hourly_behavior (market,day_of_week,hour,order_count,revenue) VALUES ${ph}
+                ON CONFLICT (market,day_of_week,hour) DO UPDATE SET order_count=EXCLUDED.order_count, revenue=EXCLUDED.revenue`,
+      r => [r.market, r.dow, r.hour, r.orderCount, Math.round(r.revenue * 100) / 100]
     );
     log(`  hourly_behavior: ${hwCount} řádků`);
   }
@@ -422,31 +468,44 @@ async function processCosts(rows) {
   log('✅ Marketingové náklady importovány.');
 }
 
+function readLocalCSV(filePath) {
+  const content = fs.readFileSync(filePath, 'utf8').replace(/^﻿/, '');
+  return parseCSV(content);
+}
+
 // ── Hlavní funkce ─────────────────────────────────────────────────────────────
 
 async function main() {
   log('=== Import dat: Zboží z Bali ===');
 
   try {
-    log('Stahuji export objednávek...');
-    const ordersCSV  = await fetchUrl(ORDERS_URL);
-    const ordersRows = parseCSV(ordersCSV);
-    log(`Staženo ${ordersRows.length} řádků.`);
+    let ordersRows;
+    if (LOCAL_MODE) {
+      log(`Čtu lokální soubor: ${LOCAL_ORDERS_FILE}`);
+      ordersRows = readLocalCSV(LOCAL_ORDERS_FILE);
+    } else {
+      log('Stahuji export objednávek...');
+      const ordersCSV = await fetchUrl(ORDERS_URL);
+      ordersRows = parseCSV(ordersCSV);
+    }
+    log(`Načteno ${ordersRows.length} řádků.`);
     await processOrders(ordersRows);
   } catch (err) {
     log(`❌ Chyba při importu objednávek: ${err.message}`);
     console.error(err.stack);
   }
 
-  try {
-    log('Stahuji export marketingových nákladů...');
-    const costsCSV  = await fetchUrl(COST_URL);
-    const costsRows = parseCSV(costsCSV);
-    log(`Staženo ${costsRows.length} řádků.`);
-    await processCosts(costsRows);
-  } catch (err) {
-    log(`❌ Chyba při importu nákladů: ${err.message}`);
-    console.error(err.stack);
+  if (!LOCAL_MODE) {
+    try {
+      log('Stahuji export marketingových nákladů...');
+      const costsCSV  = await fetchUrl(COST_URL);
+      const costsRows = parseCSV(costsCSV);
+      log(`Staženo ${costsRows.length} řádků.`);
+      await processCosts(costsRows);
+    } catch (err) {
+      log(`❌ Chyba při importu nákladů: ${err.message}`);
+      console.error(err.stack);
+    }
   }
 
   await pool.end();

@@ -16,20 +16,22 @@ const MONTHS_CS = ['Led', 'Úno', 'Bře', 'Dub', 'Kvě', 'Čvn', 'Čvc', 'Srp', 
 // ─── Data aggregation ────────────────────────────────────────────────────────
 
 interface MonthlyRow {
+  revenueVat: number;
   revenue: number;
   orders: number;
   cost: number;
 }
 
 function aggregateMonthly(records: ApiRecord[], eurToCzk: number): MonthlyRow[] {
-  const months: MonthlyRow[] = Array.from({ length: 12 }, () => ({ revenue: 0, orders: 0, cost: 0 }));
+  const months: MonthlyRow[] = Array.from({ length: 12 }, () => ({ revenueVat: 0, revenue: 0, orders: 0, cost: 0 }));
   for (const r of records) {
     // SK revenues are in EUR → convert; SK costs are already in CZK
     const revMult = r.market === 'SK' ? eurToCzk : 1;
     const m = parseInt(r.date.slice(5, 7), 10) - 1;
-    months[m].revenue += r.revenue * revMult;
-    months[m].orders  += r.order_count;
-    months[m].cost    += r.cost;
+    months[m].revenueVat += r.revenue_vat * revMult;
+    months[m].revenue    += r.revenue * revMult;
+    months[m].orders     += r.order_count;
+    months[m].cost       += r.cost;
   }
   return months;
 }
@@ -187,6 +189,7 @@ export default function HlavniDashboardPage() {
     const b = monthsB[i];
     return {
       month,
+      revenueVat: { a: a.revenueVat, b: b.revenueVat },
       revenue: { a: a.revenue, b: b.revenue },
       orders:  { a: a.orders,  b: b.orders },
       cost:    { a: a.cost,    b: b.cost },
@@ -213,7 +216,13 @@ export default function HlavniDashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-        <ChartCard title="Třžby bez DPH"
+        <ChartCard title="Tržby s DPH"
+          data={makeData('revenueVat')}
+          colorA="#16a34a" colorB="#86efac"
+          yearA={yearA} yearB={yearB}
+          axisFormatter={fmtAxisCZK} tooltipFormatter={fmtCZK}
+        />
+        <ChartCard title="Tržby bez DPH"
           data={makeData('revenue')}
           colorA="#2563eb" colorB="#93c5fd"
           yearA={yearA} yearB={yearB}
