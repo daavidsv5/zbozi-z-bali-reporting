@@ -221,7 +221,7 @@ async function processOrders(rows) {
       const vatRatio          = totalVat > 0 ? (totalVat - vatAmount) / totalVat : 1;
       orderMap.set(orderId, {
         orderId, date, market, currency,
-        totalVat, vatAmount,
+        totalVat, vatAmount, vatRatio,
         revenue:     productRevenueVat * vatRatio,
         revenueVat:  productRevenueVat,
         shippingVat,
@@ -244,7 +244,7 @@ async function processOrders(rows) {
     if (productName && !isShipping && !isPayment) {
       const qty      = parseInt(row['Kusů'] || '1', 10) || 1;
       const priceVat = parseNum(row['Cena']);
-      const vatRatio = order.revenueVat > 0 ? (order.revenueVat - order.vatAmount) / order.revenueVat : 1;
+      const vatRatio = order.vatRatio;
       order.items.push({
         name: productName,
         variant: (row['Varianta'] || '').trim(),
