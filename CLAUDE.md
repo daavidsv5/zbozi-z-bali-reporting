@@ -23,11 +23,12 @@ Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, Recharts, NextAut
 ### Tok dat
 
 ```
-Google Sheets (CSV)
-  ORDERS_SHEET_URL  →  objednávky (Shoptet export)
+Wix export CSV (lokálně nebo Google Sheets)
+  ORDERS_SHEET_URL  →  objednávky (Wix item-level export, comma delimiter, EN datum)
   COST_SHEET_URL    →  marketingové náklady (Facebook + Google Ads, per kampaň)
        ↓
   scripts/importData.js  (npm run db:import)
+    --local <soubor.csv>  →  lokální CSV bez Google Sheets
        ↓
   NeonDB (PostgreSQL) — tabulky:
     daily_orders      (date, market, revenue_vat, revenue, order_count, shipping_revenue)
@@ -37,17 +38,27 @@ Google Sheets (CSV)
     product_sales     (date, market, product_name, variant, sku, quantity, revenue)
     daily_shipping    (date, market, name, order_count, revenue_vat, free_count)
     daily_payment     (date, market, name, order_count, revenue_vat)
-    hourly_behavior   (market, day_of_week, hour, order_count)
+    hourly_behavior   (market, day_of_week, hour, order_count, revenue)
        ↓
   /api/dashboard    →  hooks/useDashboardData.ts  →  stránky
   /api/products     →  app/products/page.tsx
+  /api/behavior     →  app/behavior/page.tsx
 ```
 
 ### Aktualizace dat
 
 - **Automaticky každý den v 2:00 SEČ** — GitHub Actions (`.github/workflows/update-data.yml`) spouští `npm run db:import`, data jdou přímo do NeonDB
 - **Tlačítko Aktualizovat data** (viditelné pouze adminům v TopBaru) — volá `POST /api/update`, který triggeruje GitHub Actions workflow přes `workflow_dispatch` API → import proběhne za ~1 minutu
-- **Objednávky** — uživatel cca 1× za 3 dny nahraje nový export do Google Sheets, pak klikne na tlačítko
+- **Objednávky** — uživatel cca 1× za 3 dny stáhne Wix CSV export a spustí `node scripts/importData.js --local <soubor.csv>`
+
+### Wix CSV export — formát
+
+Wix exportuje **item-level** CSV (jeden řádek = jedna položka objednávky):
+- Oddělovač: čárka
+- Datum: anglický formát `Jun 19, 2026`
+- Čas: 12h formát `11:01:18 AM`
+- Klíčové sloupce: `Číslo objednávky`, `Datum vytvoření`, `Čas`, `Celkem`, `DPH celkem`, `Sazba dopravy`, `Měna`, `Stav platby`, `Položka`, `Kusů`, `Cena`
+- **Pozor:** `DPH celkem` obsahuje DPH pouze pro PRVNÍ položku daného řádku, **ne celkové DPH objednávky** → nelze použít pro výpočet vatRatio (viz Vzorce níže)
 
 ### Env proměnné (`.env.local`)
 
@@ -122,13 +133,15 @@ interface ApiRecord {
 
 ### hooks/useDashboardData.ts
 
-Vrací: `{ daily, prevDaily, currentData, prevData, kpi, prevKpi, yoy, chartData, currency, hasPrevData, loading, error }`
+Vrací: `{ daily, prevDaily, currentData, prevData, kpi, prevKpi, yoy, chartData, chartDataExtended, currency, hasPrevData, loading, error }`
 
 **Klíčové:** `chartData` mapuje prev-year záznamy na aktuální datumy (+1 rok) aby obě série sdílely stejnou osu X v grafech. Bez toho by se zobrazovalo dvojité období.
 
 ```typescript
 const dateKey = isPrev ? shiftToCurrentYear(r.date, 1) : r.date;
 ```
+
+**Grafy prodloužené do konce měsíce/roku (`chartDataExtended`, 2026-08):** U otevřených period (`current_month`/`current_year`) hook navíc vrací `chartDataExtended` — na rozdíl od `chartData` (jen dny s reálnými daty) obsahuje sjednocení dní aktuálního období s loňskými daty, takže loňská (přerušovaná) křivka na grafu pokračuje až do konce měsíce/roku, zatímco letošní křivka viditelně končí posledním dostupným dnem (pole = `null` pro dny bez letošních dat). Protože primární `/api/dashboard` volání omezuje `prevDaily` na stejný rozsah jako `daily` (route počítá `prevStart`/`prevEnd` prostým posunem `start`/`end` o -1 rok), hook navíc pro otevřené období pošle **druhý fetch** s rozšířeným `end` (konec měsíce/roku) jen kvůli loňským datům (`prevDailyWide`), použitým výhradně pro dostavbu `chartDataExtended`. `KpiLineCharts.tsx` a `AovCpaChart.tsx` přijímají `ExtendedChartDataPoint[]`; jejich tooltipy filtrují `p.value != null`, aby u budoucích dnů nezobrazily zavádějící „0". Sparklines v KPI kartách nadále používají nerozšířený `chartData`. Stejný princip jako u Celtic-supply reportingu (tam realizováno přes statická data, ne API fetch).
 
 ### Stránky
 
@@ -143,15 +156,15 @@ const dateKey = isPrev ? shiftToCurrentYear(r.date, 1) : r.date;
 | `/meta` | `/api/meta` (Meta Graph API) | KPI, denní grafy, tabulka kreativ — čeká na správný token |
 | `/margin` | statická data (`marginData*`) | Marže, hrubý zisk |
 | `/shipping` | `/api/shipping` | Doprava, platby, P&L |
-| `/retention` | `/api/retention` | RFM, LTV, Noví vs. stávající (CZ+SK sloučeno v CZK) |
-| `/behavior` | statická data (`hourlyData*`) | Hourly grid (all-time) |
+| `/retention` | `/api/retention` | RFM, LTV, Noví vs. stávající (CZ+SK sloučeno v CZK). Dva grouped bar charty „Noví vs. stávající zákazníci" (počty + tržby bez DPH, sjednoceno se strukturou Celtic-supply reportingu 2026-08), `computeMonthlyNewVsReturning()`/`computeMonthlyNewVsReturningRevenue()` v `lib/retentionUtils.ts`. Meziroční srovnání aktuálního (nedokončeného) měsíce jen do stejného dne loňského roku, ne k celému měsíci — `computeCurrentMonthYoyCutoff()`. |
+| `/behavior` | `/api/behavior` (NeonDB) | Hourly grid (all-time) + weekly stats z `daily_orders` |
 | `/crosssell` | statická data (`crossSellData*`) | Top 100 párů produktů |
 
 ### Klíčové soubory
 
 | Soubor | Účel |
 |--------|------|
-| `scripts/importData.js` | Import objednávek + nákladů z Google Sheets do NeonDB |
+| `scripts/importData.js` | Import objednávek z Wix CSV (lokálně `--local` nebo Google Sheets) + nákladů do NeonDB |
 | `scripts/migrate.js` | Vytvoření schématu tabulek v NeonDB |
 | `lib/schema.sql` | SQL schéma všech tabulek |
 | `lib/db.ts` | NeonDB pool (pg, ssl: rejectUnauthorized: false) |
@@ -176,9 +189,15 @@ Dva typy — **neměnit vzájemně**:
 
 **PNO** = `Marketingové investice / Tržby bez DPH × 100`
 
-**Tržby bez DPH** = `Celkem − DPH celkem` (ze Shoptet exportu, sloupec `DPH celkem` — ne fixní sazba)
+**Tržby bez DPH** = `(Celkem − Sazba dopravy) / 1,21` — použita fixní sazba 21 % (platí pro oblečení CZ i SK).
+`DPH celkem` ze Wix item-exportu se **nesmí** používat pro vatRatio — obsahuje DPH jen první položky, ne celé objednávky.
 
-**product_sales.revenue** = `priceVat × vatRatio × qty` kde `vatRatio = (revenueVat - vatAmount) / revenueVat`
+**vatRatio** = `1 / 1.21` (fixní, v `scripts/importData.js`)
+
+**product_sales.revenue** = `priceVat × vatRatio × qty` kde `vatRatio = 1/1.21`
+
+**Srovnání s Wix "Hrubý příjem":** naše `revenue` ≈ Wix +268 Kč/den (pro ~57 tis. Kč/den obrat).
+Wix počítá `Celkem/1,21 − Doprava` (odečte dopravu s DPH od základu bez DPH), my počítáme `(Celkem − Doprava)/1,21` (správnější). Rozdíl = DPH z dopravy.
 
 ### `localIsoDate(d: Date)`
 
@@ -222,11 +241,13 @@ E-maily jsou **hashované SHA-256** ihned při importu v `scripts/importData.js`
 
 ### Stránky stále na statických datech (čeká na migraci)
 
-Tyto stránky stále čtou ze statických `data/*.ts` souborů (generovaných starým `updateData.js`, který produkuje prázdná data):
+Tyto stránky stále čtou ze statických `data/*.ts` souborů:
 - `/margin` — `marginDataCZ/SK`
-- `/behavior` — `hourlyDataCZ/SK` (NeonDB tabulka `hourly_behavior` je naplněna)
 - `/orders` (histogram) — `orderValueDataCZ/SK`
 - `/crosssell` — `crossSellDataCZ/SK`
+
+**Migrace z NeonDB — dokončeno:**
+- `/behavior` — přemigrováno na `/api/behavior` (NeonDB `hourly_behavior` + `daily_orders`)
 
 ### Pre-existing TS chyby
 
