@@ -19,7 +19,7 @@ const periodTitles: Record<string, string> = {
 
 export default function DashboardPage() {
   const { filters, eurToCzk } = useFilters();
-  const { kpi, yoy, chartData, currentData, daily, currency, hasPrevData, loading } = useDashboardData(filters, undefined, eurToCzk);
+  const { kpi, yoy, chartData, chartDataExtended, currentData, daily, currency, hasPrevData, loading } = useDashboardData(filters, undefined, eurToCzk);
 
   const { start, end } = getDateRange(filters);
   const dayCount  = Math.round((end.getTime() - start.getTime()) / 86_400_000);
@@ -66,11 +66,11 @@ export default function DashboardPage() {
         <CountryDistribution data={currentData} eurToCzk={eurToCzk} />
       )}
 
-      <KpiLineCharts data={chartData} currency={currency} hasPrevData={hasPrevData} isMonthly={isMonthly} />
+      <KpiLineCharts data={chartDataExtended} currency={currency} hasPrevData={hasPrevData} isMonthly={isMonthly} />
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <AovChart data={chartData} currency={currency} hasPrevData={hasPrevData} />
-        <CpaChart data={chartData} currency={currency} hasPrevData={hasPrevData} />
+        <AovChart data={chartDataExtended} currency={currency} hasPrevData={hasPrevData} />
+        <CpaChart data={chartDataExtended} currency={currency} hasPrevData={hasPrevData} />
       </div>
 
       <DailyKpiTable daily={daily} eurToCzk={eurToCzk} />

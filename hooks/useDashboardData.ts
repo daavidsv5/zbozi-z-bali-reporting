@@ -35,6 +35,25 @@ export interface ChartDataPoint {
   cpa_prev: number;
 }
 
+/** Jako ChartDataPoint, ale current-year pole jsou `null` pro dny bez dat (dny do konce
+ *  probíhajícího měsíce/roku) — umožňuje grafu zobrazit loňskou křivku až do konce
+ *  měsíce/roku, zatímco letošní křivka viditelně končí posledním dostupným dnem. */
+export interface ExtendedChartDataPoint {
+  date: string;
+  revenue: number | null;
+  revenue_prev: number;
+  orders: number | null;
+  orders_prev: number;
+  cost: number | null;
+  cost_prev: number;
+  pno: number | null;
+  pno_prev: number;
+  aov: number | null;
+  aov_prev: number;
+  cpa: number | null;
+  cpa_prev: number;
+}
+
 export interface DashboardData {
   daily: ApiRecord[];
   prevDaily: ApiRecord[];
@@ -45,6 +64,7 @@ export interface DashboardData {
   prevKpi: KpiData;
   yoy: Record<keyof KpiData, number>;
   chartData: ChartDataPoint[];
+  chartDataExtended: ExtendedChartDataPoint[];
   currency: Currency;
   hasPrevData: boolean;
   loading: boolean;
@@ -102,6 +122,7 @@ const emptyKpi: KpiData = {
 export function useDashboardData(filters: FilterState, _ignoredData?: any, eurToCzk: number = EUR_TO_CZK): DashboardData {
   const [daily, setDaily]         = useState<ApiRecord[]>([]);
   const [prevDaily, setPrevDaily] = useState<ApiRecord[]>([]);
+  const [prevDailyWide, setPrevDailyWide] = useState<ApiRecord[]>([]);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
 
@@ -111,6 +132,18 @@ export function useDashboardData(filters: FilterState, _ignoredData?: any, eurTo
   const marketParam = filters.countries.length === 1
     ? filters.countries[0].toUpperCase()
     : 'ALL';
+
+  // Pro otevřené období (tento měsíc/rok, end = včera) chceme, aby loňská YoY křivka
+  // na grafech pokračovala až do konce měsíce/roku, ne se zastavila stejného dne jako letos.
+  const widenedEndStr = useMemo(() => {
+    if (filters.timePeriod === 'current_month') {
+      return isoDate(new Date(start.getFullYear(), start.getMonth() + 1, 0));
+    }
+    if (filters.timePeriod === 'current_year') {
+      return isoDate(new Date(start.getFullYear(), 11, 31));
+    }
+    return null;
+  }, [filters.timePeriod, start]);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,6 +164,17 @@ export function useDashboardData(filters: FilterState, _ignoredData?: any, eurTo
 
     return () => { cancelled = true; };
   }, [startStr, endStr, marketParam]);
+
+  useEffect(() => {
+    if (!widenedEndStr) { setPrevDailyWide([]); return; }
+    let cancelled = false;
+    const params = new URLSearchParams({ start: startStr, end: widenedEndStr, market: marketParam });
+    fetch(`/api/dashboard?${params}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(data => { if (!cancelled) setPrevDailyWide(data.prevDaily || []); })
+      .catch(() => { if (!cancelled) setPrevDailyWide([]); });
+    return () => { cancelled = true; };
+  }, [startStr, widenedEndStr, marketParam]);
 
   return useMemo(() => {
     const currency    = getDisplayCurrency(filters.countries);
@@ -196,9 +240,53 @@ export function useDashboardData(filters: FilterState, _ignoredData?: any, eurTo
         cpa_prev: pt.ordP > 0 ? pt.cstP / pt.ordP : 0,
       }));
 
+    // Extended chart data: union of current + (wider) prev-year dates, current fields
+    // `null` where no data exists yet (open current_month/current_year periods) — lets the
+    // loňský rok line keep going to the end of the month/year while the letošní line stops
+    // at the last real day.
+    const prevForChart = widenedEndStr ? prevDailyWide : prevDaily;
+    const extMap = new Map<string, { rev: number; revP: number; ord: number; ordP: number; cst: number; cstP: number }>();
+    const curDates = new Set<string>();
+    for (const r of daily) {
+      curDates.add(r.date);
+      const pt = extMap.get(r.date) ?? { rev: 0, revP: 0, ord: 0, ordP: 0, cst: 0, cstP: 0 };
+      pt.rev += r.revenue * (r.market === 'SK' ? eurToCzk : 1);
+      pt.ord += r.order_count;
+      pt.cst += r.cost;
+      extMap.set(r.date, pt);
+    }
+    for (const r of prevForChart) {
+      const dateKey = shiftToCurrentYear(r.date, 1);
+      const pt = extMap.get(dateKey) ?? { rev: 0, revP: 0, ord: 0, ordP: 0, cst: 0, cstP: 0 };
+      pt.revP += r.revenue * (r.market === 'SK' ? eurToCzk : 1);
+      pt.ordP += r.order_count;
+      pt.cstP += r.cost;
+      extMap.set(dateKey, pt);
+    }
+    const chartDataExtended: ExtendedChartDataPoint[] = [...extMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, pt]) => {
+        const hasCur = curDates.has(date);
+        return {
+          date,
+          revenue:      hasCur ? pt.rev : null,
+          revenue_prev: pt.revP,
+          orders:       hasCur ? pt.ord : null,
+          orders_prev:  pt.ordP,
+          cost:         hasCur ? pt.cst : null,
+          cost_prev:    pt.cstP,
+          pno:      hasCur ? (pt.rev  > 0 ? (pt.cst  / pt.rev)  * 100 : 0) : null,
+          pno_prev: pt.revP > 0 ? (pt.cstP / pt.revP) * 100 : 0,
+          aov:      hasCur ? (pt.ord  > 0 ? pt.rev  / pt.ord  : 0) : null,
+          aov_prev: pt.ordP > 0 ? pt.revP / pt.ordP : 0,
+          cpa:      hasCur ? (pt.ord  > 0 ? pt.cst  / pt.ord  : 0) : null,
+          cpa_prev: pt.ordP > 0 ? pt.cstP / pt.ordP : 0,
+        };
+      });
+
     const currentData = daily.map(toLegacyRecord);
     const prevData    = prevDaily.map(toLegacyRecord);
 
-    return { daily, prevDaily, currentData, prevData, kpi, prevKpi, yoy, chartData, currency, hasPrevData, loading, error };
-  }, [daily, prevDaily, filters, eurToCzk, loading, error]);
+    return { daily, prevDaily, currentData, prevData, kpi, prevKpi, yoy, chartData, chartDataExtended, currency, hasPrevData, loading, error };
+  }, [daily, prevDaily, prevDailyWide, widenedEndStr, filters, eurToCzk, loading, error]);
 }
