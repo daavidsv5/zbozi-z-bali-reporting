@@ -249,6 +249,12 @@ Tyto stránky stále čtou ze statických `data/*.ts` souborů:
 **Migrace z NeonDB — dokončeno:**
 - `/behavior` — přemigrováno na `/api/behavior` (NeonDB `hourly_behavior` + `daily_orders`)
 
+### `/shipping` — sjednocení sekce Doprava a platba (2026-08)
+
+**Sjednocení vizuálního stylu karet** — všechny karty v sekci (Zisk/Ztráta dopravce, graf Doprava zdarma % v čase, tabulky Dopravce/Platební metoda, Ceník dopravců) sjednoceny na `rounded-xl border-gray-100` s hlavičkou jako samostatný `div` (`px-5 py-4 border-b border-slate-100` + `h2` + `p` podnadpis); dřív mix `rounded-2xl border-slate-100` vs. `rounded-xl border-gray-100` a chybějící nadpisy u tabulek Dopravce/Platební metoda. Stejné sjednocení provedeno napříč všemi 6 reportingovými projekty (Celtic-supply, Bioprodukt, Prirozeny-beh, Sardinerie, Úleva pro nohy).
+
+**Výpočet dopravy zdarma (`free_count`)** — počítá se v `daily_shipping` (sloupec `free_count`, NeonDB) na úrovni jednotlivé objednávky, ne přes `revenue_vat === 0` na denně agregovaném řádku. Stránka používá `r.free_count ?? 0` + helper `isPickup(name)` vylučující Osobní odběr z čitatele i jmenovatele. Graf „Doprava zdarma % v čase" — sloupcový, respektuje Den/Týden/Měsíc přepínač, referenční čára na průměru, umístěn za grafem „Vývoj využitelnosti plateb".
+
 ### Pre-existing TS chyby
 
 `app/shipping/page.tsx` má ~8 TS chyb (Recharts PieLabel + Tooltip typy). Jsou pre-existující — neřešit pokud se nerefaktoruje shipping stránka.

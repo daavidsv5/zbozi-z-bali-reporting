@@ -507,7 +507,7 @@ export default function ShippingPage() {
 
       {/* Carrier P&L table */}
       {hasAnyCost && (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-100">
             <h2 className="text-sm font-semibold text-slate-700">Zisk / Ztráta dopravce</h2>
             <p className="text-xs text-slate-400 mt-0.5">Doprava zákazník minus reálné náklady e-shopu</p>
@@ -628,17 +628,17 @@ export default function ShippingPage() {
 
       {/* Free shipping % over time */}
       {freeShippingTrend.chartData.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-          <div className="flex items-start justify-between gap-4">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
             <div>
               <h2 className="text-sm font-semibold text-slate-700">Doprava zdarma % v čase</h2>
               <p className="text-xs text-slate-400 mt-0.5">Podíl objednávek s dopravou zdarma (bez Osobního odběru)</p>
             </div>
-            <span className="flex-shrink-0 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-full px-2.5 py-1 whitespace-nowrap">
+            <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
               Ø {freeShippingTrend.avgPct.toFixed(1)} % za období
             </span>
           </div>
-          <div className="mt-4">
+          <div className="p-5">
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={freeShippingTrend.chartData} margin={{ top: 5, right: 16, left: 10, bottom: 5 }} barCategoryGap="30%">
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
@@ -715,6 +715,10 @@ export default function ShippingPage() {
 
         {/* ── Shipping table ── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100">
+            <h2 className="text-sm font-semibold text-slate-700">Způsoby doručení — tabulka</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Detailní přehled objednávek a tržeb dle dopravce</p>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -760,6 +764,10 @@ export default function ShippingPage() {
 
         {/* ── Payment table ── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100">
+            <h2 className="text-sm font-semibold text-slate-700">Způsoby platby — tabulka</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Detailní přehled objednávek a tržeb dle způsobu platby</p>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -806,7 +814,7 @@ export default function ShippingPage() {
       </div>
 
       {/* Carrier cost tables */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h2 className="text-sm font-semibold text-slate-700">Ceník dopravců</h2>
