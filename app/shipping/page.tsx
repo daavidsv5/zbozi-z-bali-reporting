@@ -189,6 +189,19 @@ function PieLegend({ rows, palette, total }: {
   );
 }
 
+// Metody, které nejsou doručením zákazníkovi, se z výpočtu dopravy zdarma vylučují
+// celé — z čitatele i jmenovatele. Mají revenue_vat=0, ale nejde o "dopravu zdarma":
+// osobní odběr na prodejně, zpětné zásilky, zaslání e-mailem, servis.
+// Seznam musí zůstat shodný se scripts/updateData.js, který podle něj plní free_count —
+// jinak by řádek chyběl v čitateli, ale zůstal ve jmenovateli a podíl by klesal.
+// Kmen "osobn" pokrývá osobní / osobný / osobně; hledat "odběr" nelze, protože to chytá
+// i placená výdejní místa dopravců ("DPD doručenie do odberného miesta").
+const NON_DELIVERY = ['osobn', 'zpětná', 'zpetná', 'emailem', 'údržbu'];
+function isNonDelivery(name: string) {
+  const n = name.toLowerCase();
+  return NON_DELIVERY.some(e => n.includes(e));
+}
+
 export default function ShippingPage() {
   const { filters, eurToCzk } = useFilters();
   const [period, setPeriod] = useState<Period>('day');
@@ -256,9 +269,6 @@ export default function ShippingPage() {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-  const isPickup = (name: string) =>
-    name.toLowerCase().includes('osobní') || name.toLowerCase().includes('osobni');
-
   // ── KPIs ───────────────────────────────────────────────────────────────────
   const totalShippingRev  = shipping.reduce((s, r) => s + r.revenue_vat, 0);
   const totalPaymentRev   = payment.reduce((s, r) => s + r.revenue_vat, 0);
@@ -268,7 +278,7 @@ export default function ShippingPage() {
   const avgPayment        = totalPayCount  > 0 ? totalPaymentRev  / totalPayCount  : 0;
 
   // Free shipping % — uses free_count (per-order level), excludes Osobní odběr
-  const shippingNoPickup      = shipping.filter(r => !isPickup(r.name));
+  const shippingNoPickup      = shipping.filter(r => !isNonDelivery(r.name));
   const shipNoPickupCount     = shippingNoPickup.reduce((s, r) => s + r.count, 0);
   const freeShippingCount     = shippingNoPickup.reduce((s, r) => s + (r.free_count ?? 0), 0);
   const freeShippingPct       = shipNoPickupCount > 0 ? (freeShippingCount / shipNoPickupCount) * 100 : 0;
@@ -280,7 +290,7 @@ export default function ShippingPage() {
   const prevPayCount         = prevPayment.reduce((s, r) => s + r.count, 0);
   const prevAvgShipping      = prevShipCount > 0 ? prevTotalShippingRev / prevShipCount : 0;
   const prevAvgPayment       = prevPayCount  > 0 ? prevTotalPaymentRev  / prevPayCount  : 0;
-  const prevShippingNoPickup  = prevShipping.filter(r => !isPickup(r.name));
+  const prevShippingNoPickup  = prevShipping.filter(r => !isNonDelivery(r.name));
   const prevShipNoPickupCount = prevShippingNoPickup.reduce((s, r) => s + r.count, 0);
   const prevFreeCount         = prevShippingNoPickup.reduce((s, r) => s + (r.free_count ?? 0), 0);
   const prevFreeShippingPct   = prevShipNoPickupCount > 0 ? (prevFreeCount / prevShipNoPickupCount) * 100 : 0;
@@ -302,7 +312,7 @@ export default function ShippingPage() {
     const totalByPeriod: Record<string, number> = {};
     const freeByPeriod:  Record<string, number> = {};
     for (const r of shipping) {
-      if (isPickup(r.name)) continue;
+      if (isNonDelivery(r.name)) continue;
       const key = periodKey(r.date, period);
       totalByPeriod[key] = (totalByPeriod[key] || 0) + r.count;
       freeByPeriod[key]  = (freeByPeriod[key]  || 0) + (r.free_count ?? 0);

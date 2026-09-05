@@ -12,13 +12,32 @@ const client = new BetaAnalyticsDataClient({
 type GA4Row = { dimensionValues?: { value?: string | null }[]; metricValues?: { value?: string | null }[] };
 type MonthPoint = { sessions: number; conversions: number };
 
-async function fetchMonthly(propertyId: string, year: number): Promise<MonthPoint[]> {
+// GA4 device filter — 'all' means no filter at all
+const DEVICES = ['desktop', 'mobile', 'tablet'] as const;
+type Device = typeof DEVICES[number] | 'all';
+
+function deviceFilter(device: Device) {
+  if (device === 'all') return undefined;
+  return {
+    filter: {
+      fieldName: 'deviceCategory',
+      stringFilter: { value: device, matchType: 'EXACT' as const },
+    },
+  };
+}
+
+function parseDevice(raw: string | null): Device {
+  return (DEVICES as readonly string[]).includes(raw ?? '') ? (raw as Device) : 'all';
+}
+
+async function fetchMonthly(propertyId: string, year: number, device: Device): Promise<MonthPoint[]> {
   const [res] = await client.runReport({
     property: `properties/${propertyId}`,
     dateRanges: [{ startDate: `${year}-01-01`, endDate: `${year}-12-31` }],
     dimensions: [{ name: 'yearMonth' }],
     metrics: [{ name: 'sessions' }, { name: 'conversions' }],
     orderBys: [{ dimension: { dimensionName: 'yearMonth' } }],
+    dimensionFilter: deviceFilter(device),
   });
   const map: Record<number, MonthPoint> = {};
   for (let m = 1; m <= 12; m++) map[m] = { sessions: 0, conversions: 0 };
@@ -40,15 +59,16 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const yearA = Number(searchParams.get('yearA') ?? new Date().getFullYear());
   const yearB = yearA - 1;
+  const device = parseDevice(searchParams.get('device'));
   const czId = process.env.GA4_PROPERTY_ID!;
   const skId = process.env.GA4_PROPERTY_ID_SK!;
 
   try {
     const [czA, czB, skA, skB] = await Promise.all([
-      fetchMonthly(czId, yearA),
-      fetchMonthly(czId, yearB),
-      fetchMonthly(skId, yearA),
-      fetchMonthly(skId, yearB),
+      fetchMonthly(czId, yearA, device),
+      fetchMonthly(czId, yearB, device),
+      fetchMonthly(skId, yearA, device),
+      fetchMonthly(skId, yearB, device),
     ]);
     return NextResponse.json({ czA, czB, skA, skB });
   } catch (err: unknown) {

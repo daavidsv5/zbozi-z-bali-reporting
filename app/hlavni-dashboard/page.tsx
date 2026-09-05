@@ -1,5 +1,7 @@
 'use client';
 
+import type { ReactNode } from 'react';
+
 import { useMemo, useEffect, useState } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -58,6 +60,32 @@ function fmtAxisCount(v: number): string {
   return String(Math.round(v));
 }
 
+// ─── Device filter ───────────────────────────────────────────────────────────
+
+type Device = 'all' | 'desktop' | 'mobile' | 'tablet';
+
+const DEVICE_OPTIONS: { value: Device; label: string }[] = [
+  { value: 'all',     label: 'Všechna zařízení' },
+  { value: 'desktop', label: 'Desktop' },
+  { value: 'mobile',  label: 'Mobil' },
+  { value: 'tablet',  label: 'Tablet' },
+];
+
+function DeviceSelect({ value, onChange }: { value: Device; onChange: (d: Device) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value as Device)}
+      aria-label="Filtr zařízení"
+      className="shrink-0 text-xs text-slate-600 bg-white border border-slate-200 rounded-md px-1.5 py-1 cursor-pointer hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-300"
+    >
+      {DEVICE_OPTIONS.map(o => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  );
+}
+
 // ─── Chart component ─────────────────────────────────────────────────────────
 
 interface ChartCardProps {
@@ -70,9 +98,10 @@ interface ChartCardProps {
   yearB: number;
   axisFormatter: (v: number) => string;
   tooltipFormatter: (v: number) => string;
+  headerRight?: ReactNode;
 }
 
-function ChartCard({ title, subtitle, data, colorA, colorB, yearA, yearB, axisFormatter, tooltipFormatter }: ChartCardProps) {
+function ChartCard({ title, subtitle, data, colorA, colorB, yearA, yearB, axisFormatter, tooltipFormatter, headerRight }: ChartCardProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
@@ -100,8 +129,13 @@ function ChartCard({ title, subtitle, data, colorA, colorB, yearA, yearB, axisFo
 
   return (
     <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-4">
-      <h3 className="text-sm font-semibold text-slate-700 mb-0.5">{title}</h3>
-      {subtitle && <p className="text-xs text-slate-400 mb-2">{subtitle}</p>}
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-700 mb-0.5">{title}</h3>
+          {subtitle && <p className="text-xs text-slate-400 mb-2">{subtitle}</p>}
+        </div>
+        {headerRight}
+      </div>
       <ResponsiveContainer width="100%" height={220}>
         <BarChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} barGap={2} barCategoryGap="25%">
           <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
@@ -158,13 +192,15 @@ export default function HlavniDashboardPage() {
     return () => { cancelled = true; };
   }, [yearA, yearB, marketParam]);
 
+  const [device, setDevice] = useState<Device>('all');
+
   useEffect(() => {
     setRawCvr(null);
-    fetch(`/api/analytics/cvr-monthly?yearA=${yearA}`)
+    fetch(`/api/analytics/cvr-monthly?yearA=${yearA}&device=${device}`)
       .then(r => r.json())
       .then(json => { if (json.czA) setRawCvr(json); })
       .catch(() => {});
-  }, [yearA]);
+  }, [yearA, device]);
 
   const cvrData = useMemo(() => {
     if (!rawCvr) return null;
@@ -178,6 +214,21 @@ export default function HlavniDashboardPage() {
       month,
       a: arrA[i].sessions > 0 ? (arrA[i].conversions / arrA[i].sessions) * 100 : 0,
       b: arrB[i].sessions > 0 ? (arrB[i].conversions / arrB[i].sessions) * 100 : 0,
+    }));
+  }, [rawCvr, market]);
+
+  const sessionsData = useMemo(() => {
+    if (!rawCvr) return null;
+    const { czA, czB, skA, skB } = rawCvr;
+    const combine = (x: MonthPoint[], y: MonthPoint[]): MonthPoint[] =>
+      x.map((d, i) => ({ sessions: d.sessions + y[i].sessions, conversions: d.conversions + y[i].conversions }));
+    const [arrA, arrB] = market === 'cz' ? [czA, czB] :
+                         market === 'sk' ? [skA, skB] :
+                         [combine(czA, skA), combine(czB, skB)];
+    return MONTHS_CS.map((month, i) => ({
+      month,
+      a: arrA[i].sessions,
+      b: arrB[i].sessions,
     }));
   }, [rawCvr, market]);
 
@@ -204,6 +255,7 @@ export default function HlavniDashboardPage() {
   }
 
   const pctFmt = (v: number) => `${v.toFixed(1).replace('.', ',')} %`;
+  const countFmt = (v: number) => Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
   return (
     <div className="space-y-6">
@@ -258,6 +310,17 @@ export default function HlavniDashboardPage() {
           yearA={yearA} yearB={yearB}
           axisFormatter={fmtAxisCZK} tooltipFormatter={fmtCZK}
         />
+        {sessionsData && (
+          <ChartCard
+            title="Návštěvnost webu"
+            subtitle="Zdroj: GA4"
+            data={sessionsData}
+            colorA="#1d4ed8" colorB="#93c5fd"
+            yearA={yearA} yearB={yearB}
+            axisFormatter={fmtAxisCount} tooltipFormatter={countFmt}
+            headerRight={<DeviceSelect value={device} onChange={setDevice} />}
+          />
+        )}
         {cvrData && (
           <ChartCard
             title="Konverzní poměr"
@@ -266,6 +329,7 @@ export default function HlavniDashboardPage() {
             colorA="#0e7490" colorB="#a5f3fc"
             yearA={yearA} yearB={yearB}
             axisFormatter={fmtAxisPct} tooltipFormatter={pctFmt}
+            headerRight={<DeviceSelect value={device} onChange={setDevice} />}
           />
         )}
       </div>
