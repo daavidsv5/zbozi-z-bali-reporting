@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { BarChart2, LayoutDashboard, ShoppingCart, TrendingUp, Package, Brain, Users, ShieldCheck, LogOut, X, KeyRound, Activity, Truck, Home, Facebook } from 'lucide-react';
+import { BarChart2, LayoutDashboard, ShoppingCart, TrendingUp, Package, Brain, Users, ShieldCheck, LogOut, X, KeyRound, Activity, Truck, Home, Facebook, BookOpen } from 'lucide-react';
 import { useSession, signOut } from 'next-auth/react';
 import { useSidebar } from './ConditionalLayout';
 
@@ -40,6 +40,12 @@ const navGroups = [
     items: [
       { icon: Activity, label: 'Webová návštěvnost (GA4)', href: '/analytics' },
       { icon: Facebook, label: 'Meta Ads',                 href: '/meta' },
+    ],
+  },
+  {
+    title: 'Nápověda',
+    items: [
+      { icon: BookOpen, label: 'Slovník klíčových metrik', href: '/slovnik' },
     ],
   },
 ];

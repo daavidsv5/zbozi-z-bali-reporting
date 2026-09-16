@@ -338,3 +338,15 @@ KPI boxy rozdělené do skupin s nadpisem (`KpiGroup` v `app/dashboard/page.tsx`
 **Marže, Hrubý zisk a POAS zde nejsou** — Wix API ani NeonDB nemají nákupní ceny (`marginData*.ts` jsou staré statické soubory do 2026-05-20). Doplnit, až budou nákupní ceny k dispozici.
 
 **Hlavní Dashboard** — nový grouped bar graf **LTV (bez DPH)** za grafem CPA (kumulativně ke konci měsíce, `monthlyLtv()` v `app/hlavni-dashboard/page.tsx`, respektuje selektor trhu).
+
+## `/slovnik` — Slovník klíčových metrik (2026-09-16)
+
+Převzato ze Sardinerie reportingu. Stránka pro management: u každé metriky **co vyjadřuje**, **jak se počítá** (vzorec odpovídá kódu), **kde se v aplikaci zobrazuje**, **orientační benchmark** segmentu, případné **upozornění** a **aktuální hodnota** e-shopu za posledních 12 měsíců se štítkem „v pořádku“ / „ke sledování“.
+
+- **`lib/metricsGlossary.ts`** — obsah (segment, `METRICS`, `CATEGORY_LABELS`, `VALUE_LABEL`, `VALUE_SCOPE`). Při změně výpočtu metriky v aplikaci aktualizovat i vzorec zde.
+- **`lib/glossaryValues.ts`** — hook `useCurrentValues()` + společné `computeValues()` (stejné vzorce jako `/dashboard`). CZ + SK v Kč: `/api/dashboard?market=ALL` (SK tržby × `eurToCzk`, náklady už v Kč) + `/api/retention`; stránka ukazuje „Načítám aktuální hodnoty…“, dokud API neodpoví.
+- **`app/slovnik/page.tsx`** — jen vykreslení: vyhledávání, filtr kategorií, ohraničené boxy (`border-2 border-blue-800`) s vnitřními rámečky Co vyjadřuje / Výpočet / Benchmark.
+- **Sidebar:** skupina „Nápověda“ → Slovník klíčových metrik. **TopBar** na `/slovnik` skrývá selektor trhu i období.
+- **Benchmarky jsou orientační** rozpětí z praxe e-shopů v segmentu (móda a oblečení), ne oficiální statistika. Štítek: `better` higher/lower/range + `min`/`max`; u AOV se hodnotí jen spodní hranice (vyšší AOV není problém).
+- **Texty bez pomlček:** rozpětí „10 až 20 %“, vsuvky čárkou nebo dvojtečkou, zkratky jako „PNO (podíl nákladů na obratu)“. Matematické minus (−) ve vzorcích zůstává.
+- 23 metrik. **Bez marže, hrubého zisku, POAS, CAC a LTV:CAC** (Wix nemá nákupní ceny); CPA se hodnotí vůči AOV. Meta Ads metriky mají poznámku o čekání na přístup do Business Manageru.

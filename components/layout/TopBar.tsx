@@ -39,6 +39,7 @@ export default function TopBar({ filters, onChange }: TopBarProps) {
   const isRetention = pathname === '/retention' || pathname === '/crosssell';
   const hideAll = pathname === '/shipping' || pathname === '/analytics' || pathname === '/meta';
   const isHlavniDashboard = pathname === '/hlavni-dashboard';
+  const isGlossary = pathname === '/slovnik';
   const dash = useHlavniDashboard();
 
   const handleUpdate = async () => {
@@ -136,7 +137,7 @@ export default function TopBar({ filters, onChange }: TopBarProps) {
               <span className="text-xs text-slate-400 hidden sm:inline">vs. {dash.yearB}</span>
             </div>
           </>
-        ) : (
+        ) : isGlossary ? null : (
           <>
             {/* Country segmented control — hidden on retention page */}
             {!isRetention && (
