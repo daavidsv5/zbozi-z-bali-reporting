@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useMemo, useState, type ComponentProps } from 'react';
 import { useFilters, getDateRange } from '@/hooks/useFilters';
 import { useDashboardData } from '@/hooks/useDashboardData';
 import KpiCard from '@/components/kpi/KpiCard';
@@ -8,7 +9,8 @@ import { AovChart, CpaChart } from '@/components/charts/AovCpaChart';
 import CountryDistribution from '@/components/tables/CountryDistribution';
 import DailyKpiTable from '@/components/tables/DailyKpiTable';
 import { formatCurrency, formatPercent, formatNumber, formatDate } from '@/lib/formatters';
-import { Wallet, Banknote, ShoppingCart, BarChart2, TrendingUp, Percent, Tag } from 'lucide-react';
+import { Wallet, Banknote, ShoppingCart, BarChart2, TrendingUp, Percent, Tag, Repeat } from 'lucide-react';
+import { SK_LAUNCH_DATE } from '@/data/types';
 
 const periodTitles: Record<string, string> = {
   current_year:  'tento rok',
@@ -16,6 +18,25 @@ const periodTitles: Record<string, string> = {
   last_14_days:  'posledních 14 dní',
   custom:        'vlastní období',
 };
+
+function KpiGroup({ title, badge, cards, cols = 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4' }: {
+  title: string;
+  badge?: string;
+  cards: ComponentProps<typeof KpiCard>[];
+  cols?: string;
+}) {
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-2">
+        <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider">{title}</h2>
+        {badge && <span className="text-[10px] font-medium text-slate-500 bg-slate-100 rounded px-1.5 py-0.5">{badge}</span>}
+      </div>
+      <div className={`grid ${cols} gap-3 sm:gap-4`}>
+        {cards.map((card) => <KpiCard key={card.title} {...card} />)}
+      </div>
+    </section>
+  );
+}
 
 export default function DashboardPage() {
   const { filters, eurToCzk } = useFilters();
@@ -37,15 +58,45 @@ export default function DashboardPage() {
 
   const fc = (v: number) => formatCurrency(v, currency);
 
-  const kpiCards = [
+  // LTV (bez DPH) — per-customer z /api/retention (NeonDB), all-time; SK tržby vždy do CZK (stejně jako /retention)
+  const [retention, setRetention] = useState<{ market: string; dates: string[]; revenues: number[] }[]>([]);
+  useEffect(() => {
+    fetch('/api/retention')
+      .then(r => (r.ok ? r.json() : []))
+      .then(rows => setRetention(Array.isArray(rows) ? rows : []))
+      .catch(() => {});
+  }, []);
+  const ltv = useMemo(() => {
+    let total = 0, customers = 0;
+    for (const c of retention) {
+      const isSk = c.market === 'SK';
+      if (isSk && c.dates[0] < SK_LAUNCH_DATE) continue;
+      if (!filters.countries.includes(isSk ? 'sk' : 'cz')) continue;
+      const mult = isSk ? eurToCzk : 1;
+      for (const v of c.revenues) total += v * mult;
+      customers++;
+    }
+    return customers > 0 ? total / customers : null;
+  }, [retention, filters.countries, eurToCzk]);
+
+  const cf = <T,>(cards: T[]) => cards.map(c => ({ hasPrevData, ...c }));
+
+  const revenueCards = cf([
     { title: 'Tržby s DPH',           value: fc(kpi.revenuevat),      yoy: yoy.revenuevat, sparklineData: dailyRevenue, icon: <Wallet size={16} /> },
     { title: 'Tržby bez DPH',         value: fc(kpi.revenue),         yoy: yoy.revenue,    sparklineData: dailyRevenue, icon: <Banknote size={16} /> },
     { title: 'Počet objednávek',       value: formatNumber(kpi.orders), yoy: yoy.orders,    sparklineData: dailyOrders,  icon: <ShoppingCart size={16} /> },
     { title: 'AOV',                    value: fc(kpi.aov),             yoy: yoy.aov,        sparklineData: dailyAov,     icon: <BarChart2 size={16} /> },
+  ]);
+
+  const marketingCards = cf([
     { title: 'Marketingové investice', value: fc(kpi.cost),            yoy: yoy.cost,       sparklineData: dailyCost,    icon: <TrendingUp size={16} />, invertColors: true },
     { title: 'PNO (%)',                value: formatPercent(kpi.pno),  yoy: yoy.pno,        sparklineData: dailyPno,     icon: <Percent size={16} />,   invertColors: true },
     { title: 'Cena za objednávku',     value: fc(kpi.cpa),             yoy: yoy.cpa,        sparklineData: dailyCpa,     icon: <Tag size={16} />,       invertColors: true },
-  ].map(c => ({ ...c, hasPrevData }));
+  ]);
+
+  const customerValueCards = [
+    { title: 'LTV (bez DPH)', value: ltv !== null ? fc(ltv) : '–', yoy: null, icon: <Repeat size={16} />, hasPrevData: false },
+  ];
 
   return (
     <div className="space-y-6">
@@ -58,8 +109,13 @@ export default function DashboardPage() {
         <p className="text-sm text-slate-400">Načítám data…</p>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
-        {kpiCards.map(card => <KpiCard key={card.title} {...card} />)}
+      {/* KPI Cards — skupiny řazené jako výsledovka (marže a POAS chybí: Wix nemá nákupní ceny) */}
+      <div className="space-y-5">
+        <KpiGroup title="Obrat" cards={revenueCards} />
+        <div className="grid grid-cols-1 xl:grid-cols-[3fr_1fr] gap-5 xl:gap-4">
+          <KpiGroup title="Marketingová efektivita" cards={marketingCards} cols="grid-cols-1 sm:grid-cols-3" />
+          <KpiGroup title="Hodnota zákazníka" badge="celé období" cards={customerValueCards} cols="grid-cols-1" />
+        </div>
       </div>
 
       {filters.countries.length > 1 && (

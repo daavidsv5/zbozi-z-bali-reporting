@@ -10,6 +10,7 @@ import {
 import { useFilters } from '@/hooks/useFilters';
 import { useHlavniDashboard } from '@/hooks/useHlavniDashboard';
 import type { ApiRecord } from '@/hooks/useDashboardData';
+import { SK_LAUNCH_DATE } from '@/data/types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -36,6 +37,32 @@ function aggregateMonthly(records: ApiRecord[], eurToCzk: number): MonthlyRow[] 
     months[m].cost       += r.cost;
   }
   return months;
+}
+
+/** LTV (bez DPH) ke konci každého měsíce roku — kumulativní tržby bez DPH / kumulativní počet zákazníků
+ *  (stejná definice jako box „LTV (bez DPH)" na /dashboard). Měsíce po posledních datech = 0. */
+function monthlyLtv(year: number, customers: { dates: string[]; revenues: number[] }[]): number[] {
+  const byMonth: Record<string, { revenue: number; newCustomers: number }> = {};
+  for (const c of customers) {
+    if (!c.dates[0]) continue;
+    const first = c.dates[0].slice(0, 7);
+    (byMonth[first] ??= { revenue: 0, newCustomers: 0 }).newCustomers++;
+    c.dates.forEach((d, i) => { (byMonth[d.slice(0, 7)] ??= { revenue: 0, newCustomers: 0 }).revenue += c.revenues[i]; });
+  }
+  const months = Object.keys(byMonth).sort();
+  if (months.length === 0) return Array(12).fill(0);
+  const lastMonth = months[months.length - 1];
+  let cumRevenue = 0, cumCustomers = 0, k = 0;
+  return Array.from({ length: 12 }, (_, i) => {
+    const month = `${year}-${String(i + 1).padStart(2, '0')}`;
+    if (month > lastMonth) return 0;
+    while (k < months.length && months[k] <= month) {
+      cumRevenue   += byMonth[months[k]].revenue;
+      cumCustomers += byMonth[months[k]].newCustomers;
+      k++;
+    }
+    return cumCustomers > 0 ? cumRevenue / cumCustomers : 0;
+  });
 }
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
@@ -235,6 +262,22 @@ export default function HlavniDashboardPage() {
   const monthsA = useMemo(() => aggregateMonthly(recordsA, eurToCzk), [recordsA, eurToCzk]);
   const monthsB = useMemo(() => aggregateMonthly(recordsB, eurToCzk), [recordsB, eurToCzk]);
 
+  // LTV (bez DPH) — per-customer z /api/retention (NeonDB), all-time; SK tržby vždy do CZK (stejně jako /retention)
+  const [retention, setRetention] = useState<{ market: string; dates: string[]; revenues: number[] }[]>([]);
+  useEffect(() => {
+    fetch('/api/retention')
+      .then(r => (r.ok ? r.json() : []))
+      .then(rows => setRetention(Array.isArray(rows) ? rows : []))
+      .catch(() => {});
+  }, []);
+  const ltvCustomers = useMemo(() => retention
+    .filter(c => c.market !== 'SK' || c.dates[0] >= SK_LAUNCH_DATE)
+    .filter(c => marketParam === 'ALL' || c.market === marketParam)
+    .map(c => (c.market === 'SK' ? { dates: c.dates, revenues: c.revenues.map(v => v * eurToCzk) } : c)),
+  [retention, marketParam, eurToCzk]);
+  const ltvA = useMemo(() => monthlyLtv(yearA, ltvCustomers), [yearA, ltvCustomers]);
+  const ltvB = useMemo(() => monthlyLtv(yearB, ltvCustomers), [yearB, ltvCustomers]);
+
   const chartData = useMemo(() => MONTHS_CS.map((month, i) => {
     const a = monthsA[i];
     const b = monthsB[i];
@@ -247,8 +290,9 @@ export default function HlavniDashboardPage() {
       pno:     { a: a.revenue > 0 ? (a.cost / a.revenue) * 100 : 0, b: b.revenue > 0 ? (b.cost / b.revenue) * 100 : 0 },
       aov:     { a: a.orders > 0 ? a.revenue / a.orders : 0,        b: b.orders > 0 ? b.revenue / b.orders : 0 },
       cpa:     { a: a.orders > 0 ? a.cost    / a.orders : 0,        b: b.orders > 0 ? b.cost    / b.orders : 0 },
+      ltv:     { a: ltvA[i], b: ltvB[i] },
     };
-  }), [monthsA, monthsB]);
+  }), [monthsA, monthsB, ltvA, ltvB]);
 
   function makeData(key: keyof typeof chartData[0]): { month: string; a: number; b: number }[] {
     return chartData.map(d => ({ month: d.month, ...(d[key] as { a: number; b: number }) }));
@@ -307,6 +351,13 @@ export default function HlavniDashboardPage() {
         <ChartCard title="Cena za objednávku (CPA)"
           data={makeData('cpa')}
           colorA="#7c3aed" colorB="#c4b5fd"
+          yearA={yearA} yearB={yearB}
+          axisFormatter={fmtAxisCZK} tooltipFormatter={fmtCZK}
+        />
+        <ChartCard title="LTV (bez DPH)"
+          subtitle="Kumulativně ke konci měsíce: tržby bez DPH / počet zákazníků"
+          data={makeData('ltv')}
+          colorA="#0284c7" colorB="#7dd3fc"
           yearA={yearA} yearB={yearB}
           axisFormatter={fmtAxisCZK} tooltipFormatter={fmtCZK}
         />

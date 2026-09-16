@@ -328,3 +328,13 @@ Filtr se aplikuje na: `dailyRes`, agregované totals (současnost i loňsko), `s
 
 Implementačně převzato z Celtic-supply reportingu, kde filtr existoval dřív; nyní shodné
 ve všech 6 projektech.
+
+## `/dashboard` — Skupiny KPI boxů, POAS a LTV (2026-09-16)
+
+Převzato ze Sardinerie reportingu.
+
+KPI boxy rozdělené do skupin s nadpisem (`KpiGroup` v `app/dashboard/page.tsx`): **Obrat**, **Marketingová efektivita** a **Hodnota zákazníka** (štítek „celé období“) s novým boxem **LTV (bez DPH)** — tržby bez DPH / počet zákazníků z `/api/retention` (NeonDB), SK tržby vždy × `eurToCzk`, SK zákazníci před `SK_LAUNCH_DATE` vyloučeni (stejně jako `/retention`).
+
+**Marže, Hrubý zisk a POAS zde nejsou** — Wix API ani NeonDB nemají nákupní ceny (`marginData*.ts` jsou staré statické soubory do 2026-05-20). Doplnit, až budou nákupní ceny k dispozici.
+
+**Hlavní Dashboard** — nový grouped bar graf **LTV (bez DPH)** za grafem CPA (kumulativně ke konci měsíce, `monthlyLtv()` v `app/hlavni-dashboard/page.tsx`, respektuje selektor trhu).
