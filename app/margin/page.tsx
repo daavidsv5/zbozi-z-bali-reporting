@@ -91,43 +91,29 @@ export default function MarginPage() {
     let revVat = 0, rev = 0, orders = 0, cost = 0, purchaseCost = 0, marginRev = 0;
     let skHasPurchaseCost = false;
 
-    // Pre-build margin data maps for fast lookup
-    const marginCZMap: Record<string, number> = {};
-    for (const r of marginDataCZ) marginCZMap[r.date] = r.revenue;
-    const marginSKMap: Record<string, number> = {};
-    for (const r of marginDataSK) marginSKMap[r.date] = r.revenue;
-
-    const dailyMap: Record<string, { date: string; marze: number; marzePct: number; hrubyZisk: number; hrubyZiskPct: number }> = {};
-    const datesInRange = new Set<string>();
+    // Součty po dnech pro graf. Hrubý zisk odečítá náklady ze všech dnů v období,
+    // i ze dnů bez objednávky (bez záznamu v marginData), stejně jako KPI boxy.
+    const dailyMap: Record<string, { marze: number; hrubyZisk: number; rev: number }> = {};
+    const day = (d: string) => (dailyMap[d] ??= { marze: 0, hrubyZisk: 0, rev: 0 });
 
     // CZ data
     if (!isSKOnly) {
       for (const r of marginDataCZ) {
         if (r.date < startStr || r.date > endStr) continue;
-        datesInRange.add(r.date);
         purchaseCost += r.purchaseCost;
         marginRev    += r.revenue;
-        const dayReal = realCZByDate[r.date];
-        const dayCost = dayReal?.cost ?? 0;
-        const dayRev  = r.revenue;
-        const dayMarze = dayRev - r.purchaseCost;
-        const dayHZ    = dayMarze - dayCost;
-        const prev = dailyMap[r.date];
-        dailyMap[r.date] = {
-          date:         r.date,
-          marze:        Math.round((prev?.marze ?? 0) + dayMarze),
-          marzePct:     0, // recalculated below
-          hrubyZisk:    Math.round((prev?.hrubyZisk ?? 0) + dayHZ),
-          hrubyZiskPct: 0,
-        };
+        const v = day(r.date);
+        v.marze     += r.revenue - r.purchaseCost;
+        v.hrubyZisk += r.revenue - r.purchaseCost;
+        v.rev       += r.revenue;
       }
       for (const [d, r] of Object.entries(realCZByDate)) {
         if (d < startStr || d > endStr) continue;
-        datesInRange.add(d);
         revVat  += r.revenue_vat;
         rev     += r.revenue;
         orders  += r.orders;
         cost    += r.cost;
+        day(d).hrubyZisk -= r.cost;
       }
     }
 
@@ -135,72 +121,45 @@ export default function MarginPage() {
     if (!isCZOnly) {
       for (const r of marginDataSK) {
         if (r.date < startStr || r.date > endStr) continue;
-        datesInRange.add(r.date);
         if (r.purchaseCost > 0) skHasPurchaseCost = true;
         purchaseCost += r.purchaseCost * skMult;
         marginRev    += r.revenue * skMult;
-        const dayReal = realSKByDate[r.date];
-        const dayCost = (dayReal?.cost ?? 0) * skMult;
-        const dayRev  = r.revenue * skMult;
-        const dayMarze = dayRev - r.purchaseCost * skMult;
-        const dayHZ    = dayMarze - dayCost;
-        const prev = dailyMap[r.date];
-        dailyMap[r.date] = {
-          date:         r.date,
-          marze:        Math.round((prev?.marze ?? 0) + dayMarze),
-          marzePct:     0,
-          hrubyZisk:    Math.round((prev?.hrubyZisk ?? 0) + dayHZ),
-          hrubyZiskPct: 0,
-        };
+        const v = day(r.date);
+        v.marze     += (r.revenue - r.purchaseCost) * skMult;
+        v.hrubyZisk += (r.revenue - r.purchaseCost) * skMult;
+        v.rev       += r.revenue * skMult;
       }
       for (const [d, r] of Object.entries(realSKByDate)) {
         if (d < startStr || d > endStr) continue;
-        datesInRange.add(d);
         revVat  += r.revenue_vat * skMult;
         rev     += r.revenue * skMult;
         orders  += r.orders;
         cost    += r.cost * skMult;
+        day(d).hrubyZisk -= r.cost * skMult;
       }
     }
 
-    // Recalculate % for each day using combined revenue from margin data
-    for (const [d, v] of Object.entries(dailyMap)) {
-      let dayRev = 0;
-      if (!isSKOnly && marginCZMap[d]) dayRev += marginCZMap[d];
-      if (!isCZOnly && marginSKMap[d]) dayRev += marginSKMap[d] * skMult;
-      v.marzePct     = dayRev > 0 ? (v.marze / dayRev) * 100 : 0;
-      v.hrubyZiskPct = dayRev > 0 ? (v.hrubyZisk / dayRev) * 100 : 0;
-    }
-
-    // Group chart data by month if period > 60 days, else daily
-    const allDays = [...datesInRange].sort();
+    // Group chart data by month if period > 60 days, else daily.
+    // Procenta se počítají ze součtů za den / měsíc, ne průměrem denních procent.
+    const allDays = Object.keys(dailyMap).sort();
     const dayCount = allDays.length;
-    let chartRows: { date: string; marze: number; marzePct: number; hrubyZisk: number; hrubyZiskPct: number }[];
-
-    if (dayCount > 60) {
-      const byMonth: Record<string, { marze: number; marzePct_sum: number; hrubyZisk: number; hrubyZiskPct_sum: number; count: number }> = {};
-      for (const [d, v] of Object.entries(dailyMap)) {
-        const key = d.substring(0, 7);
-        if (!byMonth[key]) byMonth[key] = { marze: 0, marzePct_sum: 0, hrubyZisk: 0, hrubyZiskPct_sum: 0, count: 0 };
-        byMonth[key].marze         += v.marze;
-        byMonth[key].marzePct_sum  += v.marzePct;
-        byMonth[key].hrubyZisk     += v.hrubyZisk;
-        byMonth[key].hrubyZiskPct_sum += v.hrubyZiskPct;
-        byMonth[key].count++;
-      }
-      chartRows = Object.entries(byMonth)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, v]) => ({
-          date:         key + '-01',
-          marze:        Math.round(v.marze),
-          marzePct:     v.count > 0 ? v.marzePct_sum / v.count : 0,
-          hrubyZisk:    Math.round(v.hrubyZisk),
-          hrubyZiskPct: v.count > 0 ? v.hrubyZiskPct_sum / v.count : 0,
-        }));
-    } else {
-      chartRows = allDays
-        .map(d => dailyMap[d] ?? { date: d, marze: 0, marzePct: 0, hrubyZisk: 0, hrubyZiskPct: 0 });
+    const buckets: Record<string, { marze: number; hrubyZisk: number; rev: number }> = {};
+    for (const d of allDays) {
+      const key = dayCount > 60 ? d.substring(0, 7) + '-01' : d;
+      const b = (buckets[key] ??= { marze: 0, hrubyZisk: 0, rev: 0 });
+      b.marze     += dailyMap[d].marze;
+      b.hrubyZisk += dailyMap[d].hrubyZisk;
+      b.rev       += dailyMap[d].rev;
     }
+    const chartRows = Object.entries(buckets)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, v]) => ({
+        date,
+        marze:        Math.round(v.marze),
+        marzePct:     v.rev > 0 ? (v.marze / v.rev) * 100 : 0,
+        hrubyZisk:    Math.round(v.hrubyZisk),
+        hrubyZiskPct: v.rev > 0 ? (v.hrubyZisk / v.rev) * 100 : 0,
+      }));
 
     const margin      = marginRev - purchaseCost;
     const marginPct   = marginRev > 0 ? (margin / marginRev) * 100 : 0;
